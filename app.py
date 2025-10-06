@@ -1,12 +1,12 @@
-# app.py
+
+# app.py (paths fixed via environment variables)
 import os
 import io
-import sys
-import types
 import runpy
 import tempfile
 import contextlib
-from typing import List
+import types
+from typing import List, Dict, Any
 
 import streamlit as st
 import pandas as pd
@@ -19,7 +19,6 @@ st.write(
     "Uygulama scripti kendi akışında çalıştırır ve grafik/tablo çıktısını ekranda gösterir."
 )
 
-# --- Sidebar ---
 with st.sidebar:
     st.header("⚙️ Ayarlar")
     analysis_choice = st.radio(
@@ -40,7 +39,6 @@ with st.sidebar:
 
     run_btn = st.button("🚀 Analizi Çalıştır")
 
-# Script adları (aynı klasörde)
 SCRIPT_PATHS = {
     "Core Analysis": "core_analysis.py",
     "Early Withdrawal Analysis": "early_withdrawal_analysis.py",
@@ -48,68 +46,23 @@ SCRIPT_PATHS = {
 }
 
 st.info(
-    "Bu sürüm, scriptlerdeki **mutlak Excel yollarını** otomatik olarak yüklediğiniz dosyalara yönlendirir; "
-    "yani `C:\\...\\CORE_DEPOSIT_DATA.xlsx` gibi path'ler sorun çıkarmaz."
+    "Bu sürüm, scriptlerdeki **sabit Windows path** kullanımını kaldırır. "
+    "Yüklediğiniz dosyalar için ortam değişkenleri ayarlanır ve scriptler bu yolları kullanır."
 )
 
-def _save_uploaded(tmpdir: str, up, filename: str) -> str:
-    path = os.path.join(tmpdir, filename)
-    with open(path, "wb") as f:
-        f.write(up.getbuffer())
-    return path
-
-def _build_pandas_shim(path_map: dict):
-    """
-    pandas.read_excel'i sarmalayan bir shim oluşturur.
-    path_map: {'CORE_DEPOSIT_DATA.xlsx': '/tmp/.../CORE_DEPOSIT_DATA.xlsx', ...}
-    """
-    import pandas as _real_pd
-    shim = types.ModuleType("pandas")
-
-    # Tüm öznitelikleri gerçek pandas'tan kopyala
-    for name in dir(_real_pd):
-        setattr(shim, name, getattr(_real_pd, name))
-
-    real_read_excel = _real_pd.read_excel
-
-    def redirected_read_excel(io_arg, *args, **kwargs):
-        # io_arg string/Path ise dosya adını baz alıp yönlendirme yap
-        try:
-            p_str = str(io_arg)
-        except Exception:
-            p_str = io_arg
-
-        if isinstance(io_arg, (str, os.PathLike)):
-            base = os.path.basename(p_str)
-            if base in path_map:
-                io_arg = path_map[base]
-        return real_read_excel(io_arg, *args, **kwargs)
-
-    shim.read_excel = redirected_read_excel
-    return shim
-
+# --- Helpers to capture display/fig outputs ---
 def _patch_ipython_display(captured_html: List[str]):
-    """
-    IPython.display.display/HTML/Markdown'i minimal stub ile patch eder.
-    display(HTML(...)) çağrılarını yakalayıp HTML stringini captured_html listesine ekler.
-    """
     ipy = types.ModuleType("IPython")
     disp = types.ModuleType("IPython.display")
 
     class HTML:
-        def __init__(self, data):
-            self.data = data
-        def __str__(self):
-            return str(self.data)
-
+        def __init__(self, data): self.data = data
+        def __str__(self): return str(self.data)
     class Markdown:
-        def __init__(self, data):
-            self.data = data
-        def __str__(self):
-            return str(self.data)
+        def __init__(self, data): self.data = data
+        def __str__(self): return str(self.data)
 
     def display(obj):
-        # HTML/Markdown objelerini stringe çevirip sakla
         s = getattr(obj, "data", obj)
         captured_html.append(str(s))
 
@@ -118,95 +71,87 @@ def _patch_ipython_display(captured_html: List[str]):
     disp.display = display
     ipy.display = disp
 
+    import sys
     sys.modules["IPython"] = ipy
     sys.modules["IPython.display"] = disp
 
 def _patch_plotly_capture(captured_figs: List[object]):
-    """plotly.graph_objects.Figure.show() çağrılarını yakala."""
-    import plotly.graph_objects as go
-
-    def patched_show(self, *args, **kwargs):
-        captured_figs.append(self)  # sadece yakala; render etme
-        return None
-
-    go.Figure.show = patched_show  # type: ignore
+    try:
+        import plotly.graph_objects as go
+        def patched_show(self, *args, **kwargs):
+            captured_figs.append(self)
+            return None
+        go.Figure.show = patched_show  # type: ignore
+    except Exception:
+        pass
 
 def _patch_matplotlib_noop():
-    """plt.show()'u no-op yap (GUI açmaya çalışmasın)."""
     try:
         import matplotlib.pyplot as plt
-        def _noop_show(*args, **kwargs): 
-            return None
+        def _noop_show(*args, **kwargs): return None
         plt.show = _noop_show  # type: ignore
     except Exception:
         pass
 
-def run_script_with_redirects(script_path: str, holidays_path: str, data_path: str, data_label: str):
-    """
-    - pandas.read_excel -> yüklenen dosyalara yönlendirilir
-    - IPython.display.display/HTML -> yakalanır
-    - plotly Figure.show -> yakalanır
-    - matplotlib plt.show -> no-op
-    """
+def run_script(script_path: str, holidays_path: str, data_path: str, analysis_choice: str):
+    # Set environment variables expected by the scripts
+    os.environ["TURKEY_HOLIDAYS_PATH"] = holidays_path
+    if analysis_choice == "Core Analysis":
+        os.environ["CORE_DEPOSIT_DATA_PATH"] = data_path
+    elif analysis_choice == "Early Withdrawal Analysis":
+        os.environ["EARLY_WITHDRAWAL_DATA_PATH"] = data_path
+    else:
+        os.environ["PREPAYMENT_DATA_PATH"] = data_path
+
     captured_html: List[str] = []
     captured_figs: List[object] = []
 
-    # 1) IPython display patch
     _patch_ipython_display(captured_html)
-
-    # 2) plotly show patch
     _patch_plotly_capture(captured_figs)
-
-    # 3) matplotlib show no-op
     _patch_matplotlib_noop()
 
-    # 4) pandas shim'i sys.modules'a yerleştir
-    path_map = {
-        "Turkey_Holidays.xlsx": holidays_path,
-        # Her analiz scripti kendi data yolunu sabit tutsa da, base name ile eşleştiriyoruz:
-        "CORE_DEPOSIT_DATA.xlsx": data_path,
-        "EARLY_WITHDRAWAL_DATA.xlsx": data_path,
-        "PREPAYMENT_DATA.xlsx": data_path,
-    }
-    shim = _build_pandas_shim(path_map)
-    sys.modules["pandas"] = shim  # script içindeki import pandas as pd -> bu shim'i alacak
-
-    # 5) Scripti çalıştır
-    with contextlib.redirect_stdout(io.StringIO()):  # konsol çıktısını sessize al (isterseniz kaldırabilirsiniz)
+    with contextlib.redirect_stdout(io.StringIO()):
         globs = runpy.run_path(script_path, run_name="__main__")
 
     return globs, captured_figs, captured_html
 
-def _display_results(globs, captured_figs: List[object], captured_html: List[str]):
-    # 1) Grafik
+def _display_results(globs: Dict[str, Any], captured_figs: List[object], captured_html: List[str]):
+    # 1) Try to find a plotly Figure either as global "fig" or via captured .show()
     fig = globs.get("fig", None)
     if fig is None and captured_figs:
         fig = captured_figs[-1]
     if fig is not None:
         st.subheader("📈 Grafik")
         try:
-            import plotly.graph_objects as go  # noqa
             st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
             st.warning(f"Plotly grafiği çizilemedi: {e}")
 
-    # 2) Tablolar (display(HTML(...)) ile gelenler)
-    tables = []
+    # 2) Any DataFrames named table_a/b/c or *analysis*/*summary*/*result*
+    tables = {}
+    for key, val in globs.items():
+        if isinstance(val, pd.DataFrame):
+            name_low = key.lower()
+            if key in ("table_a", "table_b", "table_c") or any(tok in name_low for tok in ("analysis", "summary", "result")):
+                tables[key] = val
+
+    # Also parse HTML tables captured via display(HTML(...))
     for html in captured_html:
         if "<table" in html.lower():
             try:
                 dfs = pd.read_html(html)
-                tables.extend(dfs)
+                for i, df in enumerate(dfs, start=1):
+                    tables[f"html_table_{i}_{len(tables)+i}"] = df
             except Exception:
                 pass
 
     if tables:
         st.subheader("🧾 Tablolar")
-        for i, df in enumerate(tables, start=1):
-            st.markdown(f"**Table {i}**")
+        for name, df in tables.items():
+            st.markdown(f"**{name}**")
             st.dataframe(df, use_container_width=True)
     else:
-        st.info("Gösterilecek tablo yakalanamadı. (Script HTML tablo basmamış olabilir.)")
+        st.info("Gösterilecek tablo yakalanamadı. (Script tablo üretmemiş olabilir.)")
 
 if run_btn:
     if not holidays_file or not data_file:
@@ -216,21 +161,16 @@ if run_btn:
         if not os.path.exists(script_file):
             st.error(f"Script bulunamadı: {script_file}. `app.py` ile aynı klasörde olmalı.")
         else:
-            try:
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    # Dosyaları geçici dizine, beklenen base name'lerle kaydediyoruz
-                    holidays_path = _save_uploaded(tmpdir, holidays_file, "Turkey_Holidays.xlsx")
-                    data_path = _save_uploaded(tmpdir, data_file, data_label)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                h_path = os.path.join(tmpdir, "Turkey_Holidays.xlsx")
+                d_path = os.path.join(tmpdir, os.path.basename(data_label))
+                with open(h_path, "wb") as f: f.write(holidays_file.getbuffer())
+                with open(d_path, "wb") as f: f.write(data_file.getbuffer())
 
-                    st.success("Analiz başlatıldı. Script çalıştırılıyor...")
-                    globs, cap_figs, cap_html = run_script_with_redirects(
-                        script_path=script_file,
-                        holidays_path=holidays_path,
-                        data_path=data_path,
-                        data_label=data_label,
-                    )
-
+                st.success("Analiz başlatıldı. Script çalıştırılıyor...")
+                try:
+                    globs, cap_figs, cap_html = run_script(script_file, h_path, d_path, analysis_choice)
                     _display_results(globs, cap_figs, cap_html)
                     st.success("Analiz tamamlandı.")
-            except Exception as e:
-                st.error(f"Çalışma sırasında bir hata oluştu:\n\n{e}")
+                except Exception as e:
+                    st.error(f"Çalışma sırasında bir hata oluştu:\n\n{e}")
