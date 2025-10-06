@@ -1,6 +1,13 @@
-
+lifelines
 streamlit>=1.38.0
 pandas>=2.1.0
 numpy>=1.26.0
 plotly>=5.22.0
 openpyxl>=3.1.2
+pyecharts
+pyreadr
+statsmodels
+plotly
+scikit-learn
+rich
+IPython
