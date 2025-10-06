@@ -1,5 +1,5 @@
 
-# app.py (v2) — robust path handling: chdir into temp dir during script run
+# app.py (v3) — fix: resolve script absolute path before chdir(tmpdir)
 import os
 import io
 import runpy
@@ -46,9 +46,9 @@ SCRIPT_PATHS = {
 }
 
 st.info(
-    "Bu sürüm, dosyaları geçici klasöre yazar ve **çalışma esnasında o klasöre chdir** eder. "
-    "Böylece scriptlerdeki göreli dosya adları (ör. 'CORE_DEPOSIT_DATA.xlsx') sorunsuz bulunur. "
-    "Ayrıca ENV değişkenleri de aynı dosyaları işaret eder."
+    "Bu sürüm, dosyaları geçici klasöre yazar ve çalışma esnasında o klasöre **chdir** eder. "
+    "Ayrıca script dosyasının **mutlak yolunu** chdir'den önce çözümler; böylece "
+    "run sırasında `.../core_analysis.py` bulunamama hatası yaşanmaz."
 )
 
 # --- Helpers to capture display/fig outputs ---
@@ -95,6 +95,9 @@ def _patch_matplotlib_noop():
         pass
 
 def run_script_in_tmp(script_path: str, tmpdir: str, analysis_choice: str):
+    # Resolve script absolute path BEFORE changing directory
+    script_abs = os.path.abspath(script_path)
+
     # Set file names we will write into tmpdir
     holidays_basename = "Turkey_Holidays.xlsx"
     data_basename = {
@@ -127,7 +130,7 @@ def run_script_in_tmp(script_path: str, tmpdir: str, analysis_choice: str):
     try:
         os.chdir(tmpdir)
         with contextlib.redirect_stdout(io.StringIO()):
-            globs = runpy.run_path(script_path, run_name="__main__")
+            globs = runpy.run_path(script_abs, run_name="__main__")
     finally:
         os.chdir(old_cwd)
 
