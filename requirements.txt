@@ -9,5 +9,7 @@ pyreadr
 statsmodels
 plotly
 scikit-learn
+scikit-survival
 rich
 IPython
+panel

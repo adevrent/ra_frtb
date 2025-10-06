@@ -1,237 +1,188 @@
+# app.py
+import os
+import io
+import runpy
+import tempfile
+import contextlib
+from typing import Dict, Any, List
 
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
 import streamlit as st
+import pandas as pd
 
-# Fixed expected columns per provided XLSX files:
-# REPORT_DATE, NOTIONAL, BRANCH, PRODUCT_CODE, CURRENCY, [INTEREST_RATE, OPENING_DATE, EFFECTIVE_DATE, MATURITY, ...]
+# ----- App Config -----
+st.set_page_config(page_title="Deposit Analytics Suite", layout="wide")
 
-st.set_page_config(page_title="ALM Analizleri", layout="wide")
-st.title("ALM Analizleri — Streamlit App")
-st.caption("Seç: Core / Early Withdrawal / Prepayment → Excel yükle → **Hesapla** (kolon eşleştirme yok — şema sabit).")
+st.title("📊 Deposit Analytics Suite")
+st.write(
+    "Aşağıdan analiz türünü seçip **Turkey_Holidays.xlsx** dosyasını ve seçtiğiniz analize ait DATA dosyasını yükleyin. "
+    "Uygulama, ilgili scripti (Core / Early Withdrawal / Prepayment) kendi orijinal akışıyla çalıştırır ve "
+    "‘# RUNNING THE ANALYSIS’ kısmındaki grafik ve tabloları ekranda gösterir."
+)
 
-def _ensure_cols(df, required):
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Excel beklenen kolonları içermiyor: {missing}. Mevcut kolonlar: {list(df.columns)}")
-
-def _date(df, col="REPORT_DATE"):
-    df[col] = pd.to_datetime(df[col])
-    return df
-
-def _sort(df, col="REPORT_DATE"):
-    return df.sort_values(by=col).reset_index(drop=True)
-
-def kpi_row(pairs):
-    cols = st.columns(len(pairs))
-    for col, (label, value) in zip(cols, pairs):
-        col.metric(label, value)
-
-def area_line(fig, x, y, name, opacity=0.35):
-    fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=name, line=dict(width=2)))
-    fig.add_trace(go.Scatter(x=pd.concat([x, x[::-1]]),
-                             y=pd.concat([y, pd.Series([0]*len(y))]),
-                             fill="toself", mode="lines", line=dict(width=0.5),
-                             opacity=opacity, showlegend=False))
-
-def exp_decay(t, hl):
-    lam = np.log(2) / max(hl, 1e-9)
-    return np.exp(-lam * t)
-
-page = st.selectbox("Analiz seçiniz", ["Core Analysis", "Early Withdrawal Analysis", "Prepayment Analysis"])
-
+# ----- Sidebar Inputs -----
 with st.sidebar:
-    st.header("Excel Yükleme")
-    uploaded = st.file_uploader("Excel (.xlsx)", type=["xlsx"])
-    if page == "Core Analysis":
-        hl_days = st.number_input("Half-life (gün) — örnek", 1, 3650, 63, 1)
-        horizon_days = st.number_input("Horizon (gün)", 30, 3650, 425, 5)
-    elif page == "Early Withdrawal Analysis":
-        ew_horizon_days = st.number_input("Horizon (gün)", 30, 3650, 365, 5)
-        ew_grid = st.number_input("Izgara adımı (gün)", 1, 90, 7, 1)
+    st.header("⚙️ Ayarlar")
+
+    analysis_choice = st.radio(
+        "Analiz Türü",
+        ["Core Analysis", "Early Withdrawal Analysis", "Prepayment Analysis"],
+        index=0,
+    )
+
+    holidays_file = st.file_uploader(
+        "Turkey_Holidays.xlsx yükleyin", type=["xlsx"], accept_multiple_files=False
+    )
+
+    data_label = {
+        "Core Analysis": "CORE_DEPOSIT_DATA.xlsx",
+        "Early Withdrawal Analysis": "EARLY_WITHDRAWAL_DATA.xlsx",
+        "Prepayment Analysis": "PREPAYMENT_DATA.xlsx",
+    }[analysis_choice]
+
+    data_file = st.file_uploader(
+        f"{data_label} yükleyin", type=["xlsx"], accept_multiple_files=False
+    )
+
+    run_btn = st.button("🚀 Analizi Çalıştır")
+
+
+# ----- Script Paths (aynı klasörde oldukları varsayımıyla) -----
+SCRIPT_PATHS = {
+    "Core Analysis": "core_analysis.py",
+    "Early Withdrawal Analysis": "early_withdrawal_analysis.py",
+    "Prepayment Analysis": "prepayment_analysis.py",
+}
+
+# Uyarı bloğu
+st.info(
+    "📂 Bu uygulama, scriptlerin içinde sabitlenen dosya yollarını bozmamak için "
+    "yüklediğiniz dosyaları geçici bir klasöre yazar ve ilgili **global değişkenleri** "
+    "script çalıştırmadan önce o klasöre işaret eder (örn. `wd_PRAM`, `*_filepath`)."
+)
+
+def save_uploaded_file(tmpdir: str, uploaded, filename: str) -> str:
+    """Streamlit uploaded file'ı tmpdir altına kaydedip tam yolu döndürür."""
+    path = os.path.join(tmpdir, filename)
+    with open(path, "wb") as f:
+        f.write(uploaded.getbuffer())
+    return path
+
+def pick_data_var_for_analysis(analysis: str) -> str:
+    """Seçilen analize göre veri dosyası global değişken adını döndürür."""
+    if analysis == "Core Analysis":
+        return "core_deposit_filepath"
+    elif analysis == "Early Withdrawal Analysis":
+        return "early_withdrawal_filepath"
+    elif analysis == "Prepayment Analysis":
+        return "prepayment_filepath"
     else:
-        smoothing = st.checkbox("SMM/CPR'ı 3-periyot MA ile düzelt", True)
-    calc = st.button("Hesapla", use_container_width=True)
+        raise ValueError("Unknown analysis type")
 
-if uploaded is None:
-    st.info("Başlamak için sol taraftan Excel dosyanızı yükleyin.")
-    st.stop()
+def collect_result_tables(globs: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
+    """
+    Script çalıştıktan sonra sonuç tablolarını topla.
+    Öncelik: table_a / table_b / table_c.
+    Ek olarak, *Analysis* isimli özet df'leri de yakala (ham data ve ara df'ler hariç).
+    """
+    out = {}
 
-try:
-    xls = pd.ExcelFile(uploaded)
-    sheet = st.selectbox("Çalışma sayfası", xls.sheet_names, index=0)
-    df = pd.read_excel(xls, sheet_name=sheet)
-except Exception as e:
-    st.error(f"Excel okunamadı: {e}")
-    st.stop()
+    # Öncelik: table_a/b/c
+    for key in ["table_a", "table_b", "table_c"]:
+        if key in globs:
+            val = globs[key]
+            if isinstance(val, dict):
+                out[key] = pd.DataFrame(val)
+            elif isinstance(val, pd.DataFrame):
+                out[key] = val
 
-# Common schema checks
-required_common = ["REPORT_DATE", "NOTIONAL"]
-_ensure_cols(df, required_common)
-df = _date(df, "REPORT_DATE")
-df_plot["NOTIONAL"] = pd.to_numeric(df_plot["NOTIONAL"], errors="coerce").fillna(0.0)
+    # Ek özetler: *Analysis* ile biten/başlayan DataFrame'ler
+    for key, val in globs.items():
+        if isinstance(val, pd.DataFrame):
+            name_low = key.lower()
+            if any(token in name_low for token in ["analysis", "summary", "result"]):
+                # ham girdiler (Report_*, Max_Report_Date vb.) ve çok büyük tabloları gösterme
+                if not name_low.startswith("report_") and not name_low.startswith("max_report_date"):
+                    if key not in out:
+                        out[key] = val
 
-df = _sort(df, "REPORT_DATE")
+    return out
 
-# ---------------- Filters to match notebook selections ----------------
-with st.sidebar:
-    st.subheader("Filtreler")
-    # Safe unique lists
-    def _opts(series):
-        vals = sorted([str(x) for x in series.dropna().unique().tolist()])
-        return ["(All)"] + vals
+def run_analysis(analysis: str, holidays_xlsx, data_xlsx) -> Dict[str, Any]:
+    """
+    Seçilen scripti, enjekte edilen global değişkenler ile runpy.run_path üzerinden çalıştır.
+    Çıktı globals sözlüğünü döndür.
+    """
+    script_filename = SCRIPT_PATHS[analysis]
+    script_path = os.path.join(os.path.dirname(__file__), script_filename)
+    if not os.path.exists(script_path):
+        raise FileNotFoundError(
+            f"Script bulunamadı: {script_filename}. "
+            "Bu app.py dosyasını, ilgili scriptlerle aynı klasöre koyup deploy edin."
+        )
 
-    branch_sel = st.selectbox("BRANCH", _opts(df.get("BRANCH", pd.Series(dtype=object))), index=0)
-    prod_sel   = st.selectbox("PRODUCT_CODE", _opts(df.get("PRODUCT_CODE", pd.Series(dtype=object))), index=0)
-    curr_sel   = st.selectbox("CURRENCY", _opts(df.get("CURRENCY", pd.Series(dtype=object))), index=0)
-    daterange  = st.date_input("Tarih aralığı", [] if df_plot["REPORT_DATE"].empty else [df_plot["REPORT_DATE"].min().date(), df_plot["REPORT_DATE"].max().date()])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 1) Tatil dosyasını tmp'e yaz ve wd_PRAM ona işaret etsin
+        holidays_path = save_uploaded_file(tmpdir, holidays_xlsx, "Turkey_Holidays.xlsx")
 
-# Apply filters
-df_f = df.copy()
-if "BRANCH" in df_f.columns and branch_sel != "(All)":
-    df_f = df_f[df_f["BRANCH"].astype(str) == branch_sel]
-if "PRODUCT_CODE" in df_f.columns and prod_sel != "(All)":
-    df_f = df_f[df_f["PRODUCT_CODE"].astype(str) == prod_sel]
-if "CURRENCY" in df_f.columns and curr_sel != "(All)":
-    df_f = df_f[df_f["CURRENCY"].astype(str) == curr_sel]
-# Date filter
-if isinstance(daterange, list) and len(daterange)==2:
-    start_d, end_d = pd.to_datetime(daterange[0]), pd.to_datetime(daterange[1]) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-    df_f = df_f[(df_f["REPORT_DATE"] >= start_d) & (df_f["REPORT_DATE"] <= end_d)]
+        # 2) Veri dosyasını tmp'e yaz ve ilgili *_filepath değişkenini buna işaret ettir
+        data_var = pick_data_var_for_analysis(analysis)
+        data_path = save_uploaded_file(tmpdir, data_xlsx, data_label)
 
-# Aggregate by date (sum) to match notebook's daily totals
-if not df_f.empty:
-    df_plot = df_f.groupby("REPORT_DATE", as_index=False).agg({"NOTIONAL":"sum"})
-else:
-    df_plot = df_f
+        # run_path'e enjekte edeceğimiz global değişkenler
+        injected_globals = {
+            # Scriptler tatil dosyasını f"{wd_PRAM}/Turkey_Holidays.xlsx" olarak okuyor
+            "wd_PRAM": tmpdir,
+            # Her analiz özelindeki veri dosyası yolu
+            data_var: data_path,
+        }
 
-# Günlük toplamları (aynı tarihte çok satır varsa) aynen notebook mantığına yakın olacak şekilde topla
-if df.duplicated("REPORT_DATE").any():
-    df = df.groupby("REPORT_DATE", as_index=False).agg({"NOTIONAL":"sum"})
+        # Bazı scriptler run sırasında stdout'a (display/print) yazabiliyor;
+        # stream'i yakalayıp sessiz çalıştırıyoruz (gerekirse log’a alabilirsiniz).
+        with contextlib.redirect_stdout(io.StringIO()):
+            globs = runpy.run_path(script_path, init_globals=injected_globals)
 
-if not calc:
-    st.stop()
+        # Çalışmanın sonuçlarını geri döndür
+        return globs
 
-# ---------------- Core ----------------
-if page == "Core Analysis":
-    left, right = st.columns(2)
-    with left:
-        st.markdown("#### Demand Deposit / Notional")
-        fig = go.Figure()
-        area_line(fig, df_plot["REPORT_DATE"], df_plot["NOTIONAL"], "NOTIONAL", opacity=0.35)
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
 
-    with right:
-        st.markdown("#### Persistence (örnek)")
-        timeline = np.arange(0, horizon_days+1, 5, dtype=int)
-        pr = exp_decay(timeline, hl_days)
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=timeline, y=pr, mode="lines", fill="tozeroy", name="Persistence"))
-        mean_life_days = float(np.trapz(pr, timeline)) if len(timeline)>1 else 0.0
-fig2.add_vline(x=mean_life_days, line_width=2, line_dash="dot")
-        fig2.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig2, use_container_width=True)
+# ----- Run Button -----
+if run_btn:
+    if not holidays_file or not data_file:
+        st.error("Lütfen hem **Turkey_Holidays.xlsx** hem de analiz için gerekli **DATA** dosyasını yükleyin.")
+    else:
+        try:
+            st.success("Analiz başlatıldı. Script çalıştırılıyor...")
+            globs = run_analysis(analysis_choice, holidays_file, data_file)
 
-    mean_life_days = mean_life_days
-    total_notional = float(df_plot["NOTIONAL"].sum())
-    last_notional = float(df_plot["NOTIONAL"].iloc[-1])
+            # 1) Grafik (Plotly) yakala
+            fig = globs.get("fig", None)
+            if fig is not None:
+                st.subheader("📈 Grafik")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Script içinde `fig` nesnesi bulunamadı. (Grafik üretmeyen bir koşul olabilir.)")
 
-    kpi_row([
-        ("Toplam Notional", f"{total_notional:,.0f}"),
-        ("Son Gün Notional", f"{last_notional:,.0f}"),
-        ("Mean Life (Days)", f"{mean_life_days:,.1f}"),
-        ("Mean Life (Years)", f"{mean_life_days/365.0:,.2f}"),
-    ])
+            # 2) Tabloları yakala ve göster
+            result_tables = collect_result_tables(globs)
+            if result_tables:
+                st.subheader("🧾 Tablolar")
+                for name, df in result_tables.items():
+                    st.markdown(f"**{name}**")
+                    st.dataframe(df, use_container_width=True)
+            else:
+                st.info("Gösterilecek özet tablo yakalanamadı. Script, tabloları yalnızca HTML/print ile göstermiş olabilir.")
 
-    st.markdown("#### Veri")
-    st.dataframe(df_plot[["REPORT_DATE","NOTIONAL"]], use_container_width=True)
+            # 3) İndirilebilir çıktı (opsiyonel): yakalanan tabloları zip’leyebilirsiniz.
+            # (İsterseniz burada CSV export da eklenebilir.)
 
-# ------------- Early Withdrawal -------------
-elif page == "Early Withdrawal Analysis":
-    # Negatif değişimleri outflow kabul ederek SMM çıkarımı
-    df["NOTIONAL_SHIFT"] = df_plot["NOTIONAL"].shift(1)
-    df["DELTA"] = df_plot["NOTIONAL"] - df["NOTIONAL_SHIFT"]
-    df["OUTFLOW"] = (-df["DELTA"]).clip(lower=0)  # azalışları pozitif outflow
-    with np.errstate(divide="ignore", invalid="ignore"):
-        df["SMM"] = (df["OUTFLOW"] / df["NOTIONAL_SHIFT"]).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0, 0.999)
-    df["SURV_EMP"] = (1 - df["SMM"]).cumprod().fillna(1.0)
+            st.success("Analiz tamamlandı.")
 
-    horizon = np.arange(0, ew_horizon_days+1, ew_grid, dtype=int)
-    avg_smm = float(df["SMM"].mean())
-    surv_model = (1 - avg_smm) ** (horizon / 30.0)  # 30g ≈ 1 ay
-    mean_life_days = float(np.trapz(surv_model, horizon)) if len(horizon) > 1 else np.nan
-    avg_cpr = (1 - (1 - avg_smm) ** 12) if avg_smm > 0 else 0.0
+        except Exception as e:
+            st.error(f"Çalışma sırasında bir hata oluştu:\n\n{e}")
 
-    left, right = st.columns(2)
-    with left:
-        st.markdown("#### Notional & SMM (yaklaşık)")
-        fig = go.Figure()
-        area_line(fig, df_plot["REPORT_DATE"], df_plot["NOTIONAL"], "NOTIONAL", opacity=0.25)
-        fig.add_trace(go.Scatter(x=df_plot["REPORT_DATE"], y=df["SMM"], mode="lines+markers", name="SMM"))
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-    with right:
-        st.markdown("#### Survival (model)")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=horizon, y=surv_model, mode="lines", fill="tozeroy", name="Survival"))
-        fig2.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    kpi_row([
-        ("Ortalama SMM", f"{avg_smm*100:,.2f}%"),
-        ("Ortalama CPR", f"{avg_cpr*100:,.2f}%"),
-        ("Mean Life (Days, model)", f"{mean_life_days:,.1f}"),
-        ("Gözlem Sayısı", f"{len(df_plot):,}"),
-    ])
-
-    st.markdown("#### Veri")
-    st.dataframe(df_plot, use_container_width=True)
-
-# ------------- Prepayment -------------
-else:
-    # Aynı mantıkla ön ödeme oranı tahmini
-    df["NOTIONAL_SHIFT"] = df_plot["NOTIONAL"].shift(1)
-    df["DELTA"] = df_plot["NOTIONAL"] - df["NOTIONAL_SHIFT"]
-    df["PREPAY_AMT"] = (-df["DELTA"]).clip(lower=0)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        df["SMM"] = (df["PREPAY_AMT"] / df["NOTIONAL_SHIFT"]).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0, 0.999)
-    df["CPR"] = 1 - (1 - df["SMM"]) ** 12
-
-    if smoothing:
-        df["SMM"] = df["SMM"].rolling(3, min_periods=1).mean()
-        df["CPR"] = df["CPR"].rolling(3, min_periods=1).mean()
-        df["PREPAY_AMT"] = df["PREPAY_AMT"].rolling(3, min_periods=1).mean()
-
-    avg_smm = float(df["SMM"].mean())
-    avg_cpr = float(df["CPR"].mean())
-    horizon = np.arange(0, 360+1, 30)
-    surv_model = (1 - avg_smm) ** (horizon / 30.0)
-    wal_months = float((surv_model.sum() * (horizon[1]-horizon[0]) / 30.0)) if len(horizon) > 1 else np.nan
-
-    left, right = st.columns(2)
-    with left:
-        st.markdown("#### Notional ve Ön Ödeme Tutarı (yaklaşık)")
-        fig = go.Figure()
-        area_line(fig, df_plot["REPORT_DATE"], df_plot["NOTIONAL"], "NOTIONAL", opacity=0.25)
-        fig.add_trace(go.Scatter(x=df_plot["REPORT_DATE"], y=df["PREPAY_AMT"], mode="lines+markers", name="Prepayment (amt)"))
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-    with right:
-        st.markdown("#### CPR / SMM ve Survival (model)")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=df_plot["REPORT_DATE"], y=df["CPR"]*100, mode="lines", name="CPR (%)"))
-        fig2.add_trace(go.Scatter(x=df_plot["REPORT_DATE"], y=df["SMM"]*100, mode="lines", name="SMM (%)"))
-        fig2.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    kpi_row([
-        ("Ortalama CPR", f"{avg_cpr*100:,.2f}%"),
-        ("Ortalama SMM", f"{avg_smm*100:,.2f}%"),
-        ("WAL (ay, model)", f"{wal_months:,.1f}"),
-        ("Gözlem Sayısı", f"{len(df_plot):,}"),
-    ])
-
-    st.markdown("#### Veri")
-    st.dataframe(df_plot, use_container_width=True)
+# ----- Footer -----
+st.caption(
+    "Gereksinimler `requirements.txt` ile uyumludur (örn. lifelines, plotly, scikit-survival, openpyxl). "
+    "App dosyasını, üç analiz scripti ve requirements ile aynı dizinde kullanın. "
+    "• Script referansları: core_analysis.py, early_withdrawal_analysis.py, prepayment_analysis.py"
+)

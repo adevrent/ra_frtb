@@ -61,7 +61,6 @@ with progress_bar as pb:
     df = pd.read_excel(core_deposit_filepath)
 
 df.columns = df.columns.astype(str).str.replace(".", "_")
-# print(df)
 
 def next_business_day(date, holidays_df):
     holidays = set(holidays_df.iloc[:,0])
@@ -608,25 +607,25 @@ def core_deposit_analysis_rolling(data,
     persistence = df_MPA_adj / df_MPA_adj[0]
 
     persistence2 = np.ones(horizon + 1)
-
+    
     for j in range(1, horizon + 1):
         persistence2[j] = persistence[j - 1] * df_core_percentage
-
+    
     final_result = np.zeros((horizon + 1))
     final_result[:] = persistence2
-
+    
     distribution = persistence2[:-1] - persistence2[1:]
     average_life = np.dot(distribution, np.arange(len(distribution)))
     horizon_life = horizon
     core_amount = df_core[-1]
 
     digit = 2
-
+    
     if freq == 'D':
         mean_days = round(average_life,0)
         mean_months = round(average_life/21,digit)
         mean_years = round(average_life/252,digit)
-
+        
         horizon_days = round(horizon_life,0)
         horizon_months = round(horizon_life/21,digit)
         horizon_years = round(horizon_life/252,digit)   
@@ -636,7 +635,7 @@ def core_deposit_analysis_rolling(data,
             mean_days = round(average_life*5/1,0)
             mean_months = round(average_life*5/21,digit)
             mean_years = round(average_life*5/252,digit)
-
+            
             horizon_days = round(horizon_life*5/1,0)
             horizon_months = round(horizon_life*5/21,digit)
             horizon_years = round(horizon_life*5/252,digit)
@@ -644,7 +643,7 @@ def core_deposit_analysis_rolling(data,
             mean_days = round(average_life,0)
             mean_months = round(average_life/21,digit)
             mean_years = round(average_life/252,digit)
-
+            
             horizon_days = round(horizon_life,0)
             horizon_months = round(horizon_life/21,digit)
             horizon_years = round(horizon_life/252,digit)
@@ -652,16 +651,16 @@ def core_deposit_analysis_rolling(data,
             mean_days = round(average_life*5/1,0)
             mean_months = round(average_life*5/21,digit)
             mean_years = round(average_life*5/252,digit)
-
+            
             horizon_days = round(horizon_life*5/1,0)
             horizon_months = round(horizon_life*5/21,digit)
             horizon_years = round(horizon_life*5/252,digit)  
-
+            
     if freq == 'M':
         mean_days = round(average_life*21,0)
         mean_months = round(average_life,digit)
         mean_years = round(average_life/12,digit)      
-
+        
         horizon_days = round(horizon_life*21,0)
         horizon_months = round(horizon_life,digit)
         horizon_years = round(horizon_life/12,digit)
@@ -670,11 +669,11 @@ def core_deposit_analysis_rolling(data,
         mean_days = round(average_life/252,0)
         mean_months = round(average_life/12,digit)
         mean_years = round(average_life,digit)
-
+        
         horizon_days = round(horizon_life/252,0)
         horizon_months = round(horizon_life/12,digit)
         horizon_years = round(horizon_life,digit)
-
+        
     return df_core_percentage, core_amount, mean_days, mean_years, horizon_days, horizon_years
 
 Turkey_Holidays = pd.read_excel(f"{wd_PRAM}/Turkey_Holidays.xlsx")
@@ -719,30 +718,9 @@ Report_Core_Deposit = (Report_Core_Deposit.groupby(['Report_Date','Branch', 'Cus
 Report_Core_Deposit = Report_Core_Deposit[Report_Core_Deposit['Notional']>0]
 #Report_Core_Deposit.to_excel(wd_SAVE+'Report_Core_Deposit_BS.xlsx', index=False)
 
-Report_Core_Deposit[Report_Core_Deposit.isnull().any(axis=1)].sort_values(by='Report_Date')
-
-tmp = Report_Core_Deposit.copy()
-
-# Normalize for inspection (no drops yet)
-for c in ['Product_Code','Currency','Branch','Time_Bucket']:
-    if c in tmp.columns and tmp[c].dtype == 'object':
-        tmp[c] = (tmp[c].astype(str)
-                          .str.replace('\u00A0',' ', regex=False)  # NBSP → space
-                          .str.normalize('NFKC')                  # fix unicode width
-                          .str.strip())
-
-target = 'Vadesiz.Mevduat.Tasarruf'
-
-# Now combine with Currency
-m1 = tmp['Currency'].eq('TRY')
-m2 = tmp['Product_Code'].eq(target)
-m2c = tmp['Product_Code'].str.contains(target, regex=False, na=False)
-
-# Date parsing check
-tmp['Report_Date'] = pd.to_datetime(tmp['Report_Date'], errors='coerce')
-
+# RUNNING THE ANALYSIS
 core_deposit_analysis(Report_Core_Deposit, 
-                      branch = None,
+                      branch = None, 
                       product = "Vadesiz.Mevduat.Ticari",
                       time_bucket = None,
                       currency = 'TRY',
