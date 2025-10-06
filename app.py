@@ -1,5 +1,5 @@
 
-# app.py (paths fixed via environment variables)
+# app.py (v2) — robust path handling: chdir into temp dir during script run
 import os
 import io
 import runpy
@@ -46,8 +46,9 @@ SCRIPT_PATHS = {
 }
 
 st.info(
-    "Bu sürüm, scriptlerdeki **sabit Windows path** kullanımını kaldırır. "
-    "Yüklediğiniz dosyalar için ortam değişkenleri ayarlanır ve scriptler bu yolları kullanır."
+    "Bu sürüm, dosyaları geçici klasöre yazar ve **çalışma esnasında o klasöre chdir** eder. "
+    "Böylece scriptlerdeki göreli dosya adları (ör. 'CORE_DEPOSIT_DATA.xlsx') sorunsuz bulunur. "
+    "Ayrıca ENV değişkenleri de aynı dosyaları işaret eder."
 )
 
 # --- Helpers to capture display/fig outputs ---
@@ -93,8 +94,19 @@ def _patch_matplotlib_noop():
     except Exception:
         pass
 
-def run_script(script_path: str, holidays_path: str, data_path: str, analysis_choice: str):
-    # Set environment variables expected by the scripts
+def run_script_in_tmp(script_path: str, tmpdir: str, analysis_choice: str):
+    # Set file names we will write into tmpdir
+    holidays_basename = "Turkey_Holidays.xlsx"
+    data_basename = {
+        "Core Analysis": "CORE_DEPOSIT_DATA.xlsx",
+        "Early Withdrawal Analysis": "EARLY_WITHDRAWAL_DATA.xlsx",
+        "Prepayment Analysis": "PREPAYMENT_DATA.xlsx",
+    }[analysis_choice]
+
+    holidays_path = os.path.join(tmpdir, holidays_basename)
+    data_path = os.path.join(tmpdir, data_basename)
+
+    # Set environment variables expected by the scripts (optional but helpful)
     os.environ["TURKEY_HOLIDAYS_PATH"] = holidays_path
     if analysis_choice == "Core Analysis":
         os.environ["CORE_DEPOSIT_DATA_PATH"] = data_path
@@ -110,8 +122,14 @@ def run_script(script_path: str, holidays_path: str, data_path: str, analysis_ch
     _patch_plotly_capture(captured_figs)
     _patch_matplotlib_noop()
 
-    with contextlib.redirect_stdout(io.StringIO()):
-        globs = runpy.run_path(script_path, run_name="__main__")
+    # Run with CWD = tmpdir so relative basenames resolve
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(tmpdir)
+        with contextlib.redirect_stdout(io.StringIO()):
+            globs = runpy.run_path(script_path, run_name="__main__")
+    finally:
+        os.chdir(old_cwd)
 
     return globs, captured_figs, captured_html
 
@@ -127,7 +145,7 @@ def _display_results(globs: Dict[str, Any], captured_figs: List[object], capture
         except Exception as e:
             st.warning(f"Plotly grafiği çizilemedi: {e}")
 
-    # 2) Any DataFrames named table_a/b/c or *analysis*/*summary*/*result*
+    # 2) DataFrames (globals)
     tables = {}
     for key, val in globs.items():
         if isinstance(val, pd.DataFrame):
@@ -135,7 +153,7 @@ def _display_results(globs: Dict[str, Any], captured_figs: List[object], capture
             if key in ("table_a", "table_b", "table_c") or any(tok in name_low for tok in ("analysis", "summary", "result")):
                 tables[key] = val
 
-    # Also parse HTML tables captured via display(HTML(...))
+    # 3) HTML tables captured via display(HTML(...))
     for html in captured_html:
         if "<table" in html.lower():
             try:
@@ -162,14 +180,19 @@ if run_btn:
             st.error(f"Script bulunamadı: {script_file}. `app.py` ile aynı klasörde olmalı.")
         else:
             with tempfile.TemporaryDirectory() as tmpdir:
-                h_path = os.path.join(tmpdir, "Turkey_Holidays.xlsx")
-                d_path = os.path.join(tmpdir, os.path.basename(data_label))
-                with open(h_path, "wb") as f: f.write(holidays_file.getbuffer())
-                with open(d_path, "wb") as f: f.write(data_file.getbuffer())
+                # Save uploads into tmpdir with the exact basenames the scripts expect
+                with open(os.path.join(tmpdir, "Turkey_Holidays.xlsx"), "wb") as f:
+                    f.write(holidays_file.getbuffer())
+                with open(os.path.join(tmpdir, data_label), "wb") as f:
+                    f.write(data_file.getbuffer())
 
                 st.success("Analiz başlatıldı. Script çalıştırılıyor...")
                 try:
-                    globs, cap_figs, cap_html = run_script(script_file, h_path, d_path, analysis_choice)
+                    globs, cap_figs, cap_html = run_script_in_tmp(
+                        script_path=script_file,
+                        tmpdir=tmpdir,
+                        analysis_choice=analysis_choice,
+                    )
                     _display_results(globs, cap_figs, cap_html)
                     st.success("Analiz tamamlandı.")
                 except Exception as e:
