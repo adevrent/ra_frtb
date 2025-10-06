@@ -45,11 +45,11 @@ with st.sidebar:
     st.header("Excel Yükleme")
     uploaded = st.file_uploader("Excel (.xlsx)", type=["xlsx"])
     if page == "Core Analysis":
-        hl_days = st.number_input("Half-life (gün)", 1, 3650, 60, 1)
+        hl_days = st.number_input("Half-life (gün) — örnek", 1, 3650, 60, 1)
         horizon_days = st.number_input("Horizon (gün)", 30, 3650, 425, 5)
     elif page == "Early Withdrawal Analysis":
         ew_horizon_days = st.number_input("Horizon (gün)", 30, 3650, 365, 5)
-        ew_grid = st.number_input("Grid aralığı (gün)", 1, 90, 7, 1)
+        ew_grid = st.number_input("Izgara adımı (gün)", 1, 90, 7, 1)
     else:
         smoothing = st.checkbox("SMM/CPR'ı 3-periyot MA ile düzelt", True)
     calc = st.button("Hesapla", use_container_width=True)
