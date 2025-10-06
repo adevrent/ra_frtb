@@ -719,9 +719,9 @@ Report_Core_Deposit = Report_Core_Deposit[Report_Core_Deposit['Notional']>0]
 #Report_Core_Deposit.to_excel(wd_SAVE+'Report_Core_Deposit_BS.xlsx', index=False)
 
 # RUNNING THE ANALYSIS
-core_deposit_analysis(Report_Core_Deposit, 
-                      branch = None, 
-                      product = "Vadesiz.Mevduat.Ticari",
-                      time_bucket = None,
-                      currency = 'TRY',
-                      freq = 'W', type = 'mean', nsim = 100000, excel = False, plot = True)
+# core_deposit_analysis(Report_Core_Deposit, 
+#                       branch = None, 
+#                       product = "Vadesiz.Mevduat.Ticari",
+#                       time_bucket = None,
+#                       currency = 'TRY',
+#                       freq = 'W', type = 'mean', nsim = 100000, excel = False, plot = True)

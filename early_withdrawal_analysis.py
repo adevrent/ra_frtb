@@ -317,56 +317,56 @@ df = df_early_withdrawal(Report_Early_Withdrawal,
 
 
 # RUNNING THE ANALYSIS
-time_points, survival_probabilities, confidence_interval, median_survival_time = kaplan_meier_estimator_custom(df)
+# time_points, survival_probabilities, confidence_interval, median_survival_time = kaplan_meier_estimator_custom(df)
 
-survival_probabilities_diff = survival_probabilities - 0.5
-median_survival_time_adj = np.interp(min(survival_probabilities_diff), survival_probabilities_diff[::-1], time_points[::-1])
+# survival_probabilities_diff = survival_probabilities - 0.5
+# median_survival_time_adj = np.interp(min(survival_probabilities_diff), survival_probabilities_diff[::-1], time_points[::-1])
 
-if max(survival_probabilities) > 0.5:
-    median_survival_time = median_survival_time
-else:
-    median_survival_time = median_survival_time_adj
+# if max(survival_probabilities) > 0.5:
+#     median_survival_time = median_survival_time
+# else:
+#     median_survival_time = median_survival_time_adj
 
-fig = make_subplots(rows=1, cols=1, subplot_titles=(""))
+# fig = make_subplots(rows=1, cols=1, subplot_titles=(""))
 
-fig.add_trace(go.Scatter(
-    x=time_points,
-    y=survival_probabilities,
-    mode='lines',
-    line=dict(color='darkorange'),
-    name='Notional / Core Deposit'),
-              row=1, col=1
-             )
+# fig.add_trace(go.Scatter(
+#     x=time_points,
+#     y=survival_probabilities,
+#     mode='lines',
+#     line=dict(color='darkorange'),
+#     name='Notional / Core Deposit'),
+#               row=1, col=1
+#              )
 
-y_min = round(min(survival_probabilities),2)
+# y_min = round(min(survival_probabilities),2)
 
-fig.update_layout(
-            title="Early Withdrawal Analysis",
-            width=700,
-            height=500,
-            plot_bgcolor="#fff",
-            showlegend=False,
-            yaxis=dict(range=[y_min,1])
-)
+# fig.update_layout(
+#             title="Early Withdrawal Analysis",
+#             width=700,
+#             height=500,
+#             plot_bgcolor="#fff",
+#             showlegend=False,
+#             yaxis=dict(range=[y_min,1])
+# )
 
-fig.add_vline(x=median_survival_time_adj, line_width=2, line_dash="dot", line_color="royalblue")
+# fig.add_vline(x=median_survival_time_adj, line_width=2, line_dash="dot", line_color="royalblue")
 
-fig.update_xaxes(title_text="Time", row=1, col=1)
-fig.update_yaxes(title_text="Probability of Survival", row=1, col=1)
+# fig.update_xaxes(title_text="Time", row=1, col=1)
+# fig.update_yaxes(title_text="Probability of Survival", row=1, col=1)
 
-fig.show()
+# fig.show()
 
-table_a = {'1-year Survival Probability (95% CI)': [],
-           '1-year Early Withdrawal Probability (95% CI)': [],
-           'Survival Time (Adjusted)': [],
-           'Survival Time (Probability)': [],
-           'Survival Time (Max)': []}
+# table_a = {'1-year Survival Probability (95% CI)': [],
+#            '1-year Early Withdrawal Probability (95% CI)': [],
+#            'Survival Time (Adjusted)': [],
+#            'Survival Time (Probability)': [],
+#            'Survival Time (Max)': []}
 
-table_a['1-year Survival Probability (95% CI)'].append(round((np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
-table_a['1-year Early Withdrawal Probability (95% CI)'].append(round((1-np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
-table_a['Survival Time (Adjusted)'].append(round(median_survival_time_adj,0))
-table_a['Survival Time (Probability)'].append(round((np.interp(median_survival_time_adj, time_points[::1], survival_probabilities[::1]))*100,2))
-table_a['Survival Time (Max)'].append(round(median_survival_time,0))
+# table_a['1-year Survival Probability (95% CI)'].append(round((np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
+# table_a['1-year Early Withdrawal Probability (95% CI)'].append(round((1-np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
+# table_a['Survival Time (Adjusted)'].append(round(median_survival_time_adj,0))
+# table_a['Survival Time (Probability)'].append(round((np.interp(median_survival_time_adj, time_points[::1], survival_probabilities[::1]))*100,2))
+# table_a['Survival Time (Max)'].append(round(median_survival_time,0))
 
-table_a = pd.DataFrame(table_a)
-display(HTML(table_a.to_html(index=False)))
+# table_a = pd.DataFrame(table_a)
+# display(HTML(table_a.to_html(index=False)))
