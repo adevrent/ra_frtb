@@ -6,6 +6,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 from sksurv.nonparametric import kaplan_meier_estimator
 from IPython.display import HTML, display
+import statsmodels.api as sm
 
 # --- Helpers: column normalization (case/variant tolerant) ---
 def _ensure_columns(df, aliases):
