@@ -1,82 +1,128 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from io import BytesIO
-
-# Notebook-derived imports
-import math
-import pyreadr
-import warnings
-import lifelines
-import panel as pn
-import statsmodels.api as sm
-from datetime import timedelta
-from pyecharts import options as opts
-from pyecharts.globals import ThemeType
-from pyecharts.charts import *
-from pyecharts.components import Table
-import plotly.graph_objects as go
+from datetime import datetime, timedelta
 from plotly.subplots import make_subplots
-import plotly.express as px
-from sklearn.preprocessing import LabelEncoder
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+import plotly.graph_objects as go
 from sksurv.nonparametric import kaplan_meier_estimator
-from lifelines import KaplanMeierFitter, WeibullAFTFitter, CoxPHFitter
-from lifelines import WeibullFitter, ExponentialFitter, LogNormalFitter, LogLogisticFitter, PiecewiseExponentialFitter, NelsonAalenFitter, SplineFitter
-from lifelines.utils import find_best_parametric_model, median_survival_times
-from pathlib import Path
-from tqdm import tqdm
-from scipy import stats
-from scipy.stats import norm
-from timeit import default_timer as timer
-from itertools import combinations, batched
-from rich.progress import track, BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn
-from IPython.display import display, HTML, Markdown
-from rich.progress import track
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+from IPython.display import HTML, display
 
+def run_km_prepayment(df):
+    time_points, survival_probabilities, confidence_interval, median_survival_time = kaplan_meier_estimator_custom(df)
 
+    survival_probabilities_diff = survival_probabilities - 0.5
+    median_survival_time_adj = np.interp(min(survival_probabilities_diff), survival_probabilities_diff[::-1], time_points[::-1])
 
-import inspect
-
-def call_with_supported_kwargs(fn, *args, **kwargs):
-    # Calls function dropping any kwargs it doesn't accept
-    sig = inspect.signature(fn)
-    params = sig.parameters
-    supported = {k: v for k, v in kwargs.items() if k in params}
-    return fn(*args, **supported)
-
-def _filter_by_date_range(df, start_iso, end_iso):
-    if df is None:
-        return df
-    start = pd.to_datetime(start_iso)
-    end = pd.to_datetime(end_iso)
-    candidates = [c for c in df.columns if c.lower() == "date"]
-    col = None
-    if candidates:
-        col = candidates[0]
+    if max(survival_probabilities) > 0.5:  
+        median_survival_time = median_survival_time
     else:
-        for c in df.columns:
-            try:
-                parsed = pd.to_datetime(df[c], errors="coerce")
-                if parsed.notna().mean() > 0.8:
-                    df[c] = parsed
-                    col = c
-                    break
-            except Exception:
-                continue
-    if col is None:
-        return df
-    df[col] = pd.to_datetime(df[col])
-    m = (df[col] >= start) & (df[col] <= end)
-    return df.loc[m].copy()
+        median_survival_time = median_survival_time_adj
 
-# ==== Extracted function/class code from notebooks ====
+    fig = make_subplots(rows=1, cols=1, subplot_titles=(""))
 
-# ---- from notebook ----
+    fig.add_trace(go.Scatter(
+        x=time_points,
+        y=survival_probabilities,
+        mode='lines',
+        line=dict(color='darkorange'),
+        name='Notional / Core Deposit'),
+                  row=1, col=1
+                 )
+
+    y_min = round(min(survival_probabilities),2)
+
+    fig.update_layout(
+                title="Prepayment Analysis",
+                width=700,
+                height=500,
+                plot_bgcolor="#fff",
+                showlegend=False,
+                yaxis=dict(range=[y_min,1])
+    ) 
+        
+
+    fig.add_vline(x=median_survival_time_adj, line_width=2, line_dash="dot", line_color="royalblue")
+
+    fig.add_vline(x=365.25, line_width=2, line_dash="dot", line_color="firebrick")
+    fig.add_hline(y=round((np.interp(365.25, time_points[::1], survival_probabilities[::1])),2), line_width=2, line_dash="dot", line_color="firebrick")
+
+
+    fig.update_xaxes(title_text="Time", row=1, col=1)
+    fig.update_yaxes(title_text="Probability of Survival", row=1, col=1)
+
+
+    table_a = {'1-year Survival Probability (95% CI)': [],
+               '1-year Prepayment Probability (95% CI)': [],
+               'Survival Time (Adjusted)': [],
+               'Survival Time (Probability)': [],
+               'Survival Time (Max)': []}
+
+    table_a['1-year Survival Probability (95% CI)'].append(round((np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
+    table_a['1-year Prepayment Probability (95% CI)'].append(round((1-np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
+    table_a['Survival Time (Adjusted)'].append(round(median_survival_time_adj,0))
+    table_a['Survival Time (Probability)'].append(round((np.interp(median_survival_time_adj, time_points[::1], survival_probabilities[::1]))*100,2))
+    table_a['Survival Time (Max)'].append(round(median_survival_time,0))
+
+    table_a = pd.DataFrame(table_a)
+    return fig, table_a
+
+def run_km_early_withdrawal(df):
+    time_points, survival_probabilities, confidence_interval, median_survival_time = kaplan_meier_estimator_custom(df)
+
+    survival_probabilities_diff = survival_probabilities - 0.5
+    median_survival_time_adj = np.interp(min(survival_probabilities_diff), survival_probabilities_diff[::-1], time_points[::-1])
+
+    if max(survival_probabilities) > 0.5:  
+        median_survival_time = median_survival_time
+    else:
+        median_survival_time = median_survival_time_adj
+
+    fig = make_subplots(rows=1, cols=1, subplot_titles=(""))
+
+    fig.add_trace(go.Scatter(
+        x=time_points,
+        y=survival_probabilities,
+        mode='lines',
+        line=dict(color='darkorange'),
+        name='Notional / Core Deposit'),
+                  row=1, col=1
+                 )
+
+    y_min = round(min(survival_probabilities),2)
+
+    fig.update_layout(
+                title="Early Withdrawal Analysis",
+                width=700,
+                height=500,
+                plot_bgcolor="#fff",
+                showlegend=False,
+                yaxis=dict(range=[y_min,1])
+    ) 
+
+
+    fig.add_vline(x=median_survival_time_adj, line_width=2, line_dash="dot", line_color="royalblue")
+
+    fig.update_xaxes(title_text="Time", row=1, col=1)
+    fig.update_yaxes(title_text="Probability of Survival", row=1, col=1)
+
+
+    table_a = {'1-year Survival Probability (95% CI)': [],
+               '1-year Early Withdrawal Probability (95% CI)': [],
+               'Survival Time (Adjusted)': [],
+               'Survival Time (Probability)': [],
+               'Survival Time (Max)': []}
+
+    table_a['1-year Survival Probability (95% CI)'].append(round((np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
+    table_a['1-year Early Withdrawal Probability (95% CI)'].append(round((1-np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
+    table_a['Survival Time (Adjusted)'].append(round(median_survival_time_adj,0))
+    table_a['Survival Time (Probability)'].append(round((np.interp(median_survival_time_adj, time_points[::1], survival_probabilities[::1]))*100,2))
+    table_a['Survival Time (Max)'].append(round(median_survival_time,0))
+
+    table_a = pd.DataFrame(table_a)
+    return fig, table_a
+
+# === Core Analysis functions (patched) ===
+
 def next_business_day(date, holidays_df):
     holidays = set(holidays_df.iloc[:,0])
     next_day = date + timedelta(days=1)
@@ -120,7 +166,7 @@ def rolling_dates(data, year = 5):
     
     return rolling_dates
 
-def data_model(data, data_year_basis = None, start_date = None, end_date = None, excel = False):
+def data_model_core(data, data_year_basis = None, start_date = None, end_date = None, excel = False):
     
     data['REPORT_DATE'] = pd.to_datetime(data['REPORT_DATE'])
 
@@ -455,7 +501,7 @@ def core_deposit_analysis(data,
         fig.update_yaxes(title_text="Demand Deposit", row=1, col=1)
         #fig.update_yaxes(title_text="Demand Deposit", row=1, col=2)
         
-        fig.show()
+        # fig.show()
 
     table_a = {'Core Deposit %': [],
                'Core Deposits (Mio)': []}
@@ -483,12 +529,10 @@ def core_deposit_analysis(data,
     table_b = pd.DataFrame(table_b)
     table_c = pd.DataFrame(table_c)
     
-    display(HTML(table_a.to_html(index=False)))
-    display(HTML(table_b.to_html(index=False)))
-    display(HTML(table_c.to_html(index=False)))
-    
-    return 
-
+    # display(HTML(table_a.to_html(index=False)))
+    # display(HTML(table_b.to_html(index=False)))
+    # display(HTML(table_c.to_html(index=False)))
+    return table_a, table_b, table_c, data, (fig if 'fig' in locals() else None)
 def core_deposit_analysis_rolling(data, 
                                   branch = None, 
                                   product = None, 
@@ -691,7 +735,8 @@ def core_deposit_analysis_rolling(data,
         
     return df_core_percentage, core_amount, mean_days, mean_years, horizon_days, horizon_years
 
-# ---- from notebook ----
+# === Prepayment helpers ===
+
 Turkey_Holidays = pd.read_excel(f"{wd_PRAM}/Turkey_Holidays.xlsx")
 Turkey_Holidays['TURKEY_HOLIDAYS'] = pd.to_datetime(Turkey_Holidays['TURKEY_HOLIDAYS'])
 
@@ -786,7 +831,11 @@ def move_string_to_end(s):
         parts.append("Currency")
     return ",".join(parts)
 
-def data_model(data, data_year_basis = None, start_date = None, end_date = None, excel = False, Max_Report_Date = None):
+
+
+# === Prepayment data_model (renamed) ===
+
+def data_model_prep(data, data_year_basis = None, start_date = None, end_date = None, excel = False, Max_Report_Date = None):
     if Max_Report_Date is None:
         Max_Report_Date = data.groupby('CUSTOMER_ID')['REPORT_DATE'].max().reset_index().rename(columns={'REPORT_DATE': 'MAX_RPT'})
     data['REPORT_DATE'] = pd.to_datetime(data['REPORT_DATE'])
@@ -877,7 +926,8 @@ def data_model(data, data_year_basis = None, start_date = None, end_date = None,
         
     return data
 
-# ---- from notebook ----
+# === df_prepayment ===
+
 def df_prepayment(data, 
                   branch = None, 
                   product = None, 
@@ -914,7 +964,8 @@ def df_prepayment(data,
         data.reset_index(drop=True, inplace=True)
     return data
 
-# ---- from notebook ----
+# === Early Withdrawal helpers ===
+
 def next_business_day(date, holidays_df):
     holidays = set(holidays_df.iloc[:,0])
     next_day = date + timedelta(days=1)
@@ -993,7 +1044,11 @@ def kaplan_meier_estimator_custom(df):
         
     return time_points, survival_probabilities, confidence_interval, median_survival_time
     
-def data_model(data, data_year_basis = None, start_date = None, end_date = None, excel = False):
+
+
+# === Early Withdrawal data_model (renamed) ===
+
+def data_model_ew(data, data_year_basis = None, start_date = None, end_date = None, excel = False):
     
     data['REPORT_DATE'] = pd.to_datetime(data['REPORT_DATE'])
 
@@ -1076,7 +1131,8 @@ def data_model(data, data_year_basis = None, start_date = None, end_date = None,
         
     return data
 
-# ---- from notebook ----
+# === df_early_withdrawal ===
+
 def df_early_withdrawal(data, 
                         branch = None, 
                         product = None, 
@@ -1117,166 +1173,166 @@ def df_early_withdrawal(data,
         data.reset_index(drop=True, inplace=True)
     return data
 
-st.set_page_config(page_title="FRTB Analyses", layout="wide")
+def build_business_days(holidays_df, start, end):
+    holidays_series = pd.to_datetime(holidays_df.iloc[:,0])
+    business_days = pd.date_range(start=start, end=end, freq='B')
+    turkey_business_days = business_days[~business_days.isin(holidays_series)]
+    monthly_bd = (
+        pd.DataFrame({"Business_Days": turkey_business_days})
+        .assign(YearMonth=lambda df: df["Business_Days"].dt.to_period("M"))
+        .groupby("YearMonth")["Business_Days"]
+        .agg(["first", "last"])
+        .reset_index(drop=True)
+    )
+    return turkey_business_days, monthly_bd
 
-st.title("FRTB Analyses — Core / Prepayment / Early Withdrawal")
-st.caption("Upload-only app: no static filepaths. Drop your Turkey_Holidays.xlsx and the corresponding data file for each analysis.")
 
-analysis = st.radio(
-    "Select analysis",
-    ["Core Analysis", "Prepayment Analysis", "Early Withdrawal Analysis"],
-    horizontal=True
-)
+st.set_page_config(page_title="FRTB Analyses App", layout="wide")
+
+st.title("FRTB Analyses — Core Deposit / Prepayment / Early Withdrawal")
+
+analysis = st.radio("Choose analysis", ["Core Analysis", "Prepayment Analysis", "Early Withdrawal Analysis"], horizontal=True)
+
+holidays_file = st.file_uploader("Upload Turkey Holidays XLSX", type=["xlsx"], key="holidays")
 
 if analysis == "Core Analysis":
-    st.subheader("Inputs")
-    date_start = st.text_input("date_start (ISO, e.g. 2017-01-01)", value="2017-01-01")
-    date_end = st.text_input("date_end (ISO, e.g. 2018-01-01)", value="2018-01-01")
-    currency = st.selectbox("currency", ["USD", "EUR", "TRY"], index=2)
-    freq = st.selectbox("freq", ["W", "M", "Y"], index=1)
-    agg_type = st.selectbox("type", ["mean", "roll"], index=0)
+    data_file = st.file_uploader("Upload CORE_DEPOSIT_DATA.xlsx", type=["xlsx"], key="core")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        date_start = st.text_input("Start date (ISO)", "2017-01-01")
+    with col2:
+        date_end = st.text_input("End date (ISO)", "2018-01-01")
+    with col3:
+        currency = st.selectbox("Currency", ["USD", "EUR", "TRY"], index=2)
+    col4, col5 = st.columns(2)
+    with col4:
+        freq = st.selectbox("Frequency", ["W", "M", "Y"], index=1)
+    with col5:
+        agg_type = st.selectbox("Aggregation type", ["mean", "roll"], index=0)
+    run = st.button("Run Core Analysis", type="primary", use_container_width=True)
 
-    holidays_file = st.file_uploader("Upload Turkey_Holidays.xlsx", type=["xlsx"], key="hol_core")
-    data_file = st.file_uploader("Upload CORE_DEPOSIT_DATA.xlsx", type=["xlsx"], key="data_core")
+    if run:
+        if holidays_file is None or data_file is None:
+            st.error("Please upload both the Turkey Holidays file and the CORE_DEPOSIT_DATA.xlsx file.")
+        else:
+            holidays_df = pd.read_excel(holidays_file)
+            data_df = pd.read_excel(data_file)
+            # Ensure dates are datetime
+            try:
+                data_df['REPORT_DATE'] = pd.to_datetime(data_df['REPORT_DATE'])
+            except Exception:
+                pass
 
-    if holidays_file and data_file and st.button("Run Core Analysis"):
-        holidays_df = pd.read_excel(holidays_file)
-        data_df = pd.read_excel(data_file)
-        data_df = _filter_by_date_range(data_df, date_start, date_end)
-        # Call with signature-aware kwargs
-        try:
-            fig, df_out = call_with_supported_kwargs(
-                core_deposit_analysis,
-                data_df,
-                holidays_df,
-                branch=None,
-                product=None,
-                time_bucket=None,
-                currency=currency,
-                freq=freq,
-                type=agg_type
-            )
-            st.pyplot(fig, use_container_width=True)
-            st.dataframe(df_out)
-        except Exception as e:
-            st.exception(e)
+            try:
+                # core_deposit_analysis returns (table_a, table_b, table_c, data, fig_or_none) after our patch
+                table_a, table_b, table_c, out_data, fig = core_deposit_analysis(
+                    data=data_df,
+                    branch=None,
+                    product=None,
+                    time_bucket=None,
+                    currency=currency,
+                    freq=freq,
+                    type=agg_type,
+                    nsim=100000,
+                    excel=False,
+                    plot=True
+                )
+                st.subheader("Core Deposit Plot")
+                if fig is not None:
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Figure not available from function.")
+                st.subheader("Tables")
+                st.dataframe(table_a, use_container_width=True)
+                st.dataframe(table_b, use_container_width=True)
+                st.dataframe(table_c, use_container_width=True)
+            except Exception as e:
+                st.exception(e)
 
 elif analysis == "Prepayment Analysis":
-    st.subheader("Inputs")
-    start = st.text_input("start (Business_Days start, ISO)", value="2017-01-01")
-    end = st.text_input("end (Business_Days end, ISO)", value="2025-12-31")
-    currency = st.selectbox("currency", ["EUR", "USD", "TRY"], index=2, key="curr_prepay")
+    data_file = st.file_uploader("Upload PREPAYMENT_DATA.xlsx", type=["xlsx"], key="prep")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        start = st.text_input("Business Days start (ISO)", "2017-01-01")
+    with col2:
+        end = st.text_input("Business Days end (ISO)", "2025-12-31")
+    with col3:
+        currency = st.selectbox("Currency", ["EUR", "USD", "TRY"], index=2)
+    run = st.button("Run Prepayment Analysis", type="primary", use_container_width=True)
+    if run:
+        if holidays_file is None or data_file is None:
+            st.error("Please upload both the Turkey Holidays file and the PREPAYMENT_DATA.xlsx file.")
+        else:
+            holidays_df = pd.read_excel(holidays_file)
+            data_df = pd.read_excel(data_file)
+            # Build business days frames
+            turkey_bd, monthly_bd = build_business_days(holidays_df, start, end)
+            # The data_model_prep expects 'Monthly_Business_Days' to be available; we will set it as a global
+            globals()['Monthly_Business_Days'] = monthly_bd
 
-    holidays_file = st.file_uploader("Upload Turkey_Holidays.xlsx", type=["xlsx"], key="hol_prepay")
-    data_file = st.file_uploader("Upload PREPAYMENT_DATA.xlsx", type=["xlsx"], key="data_prepay")
-
-    if holidays_file and data_file and st.button("Run Prepayment Analysis"):
-        holidays_df = pd.read_excel(holidays_file)
-        data_df = pd.read_excel(data_file)
-        data_df = _filter_by_date_range(data_df, start, end)
-        business_days = pd.date_range(start=start, end=end, freq='B')
-
-        try:
-            report = call_with_supported_kwargs(
-                data_model,
-                data_df,
-                data_year_basis=8,
-                start_date=start,
-                end_date=end,
-                excel=False,
-                business_days=business_days,
-                holidays=holidays_df
-            )
-        except Exception as e:
-            st.exception(e)
-            report = None
-
-        try:
-            df = call_with_supported_kwargs(
-                df_prepayment,
-                report if report is not None else data_df,
-                branch=None,
-                product=None,
-                time_bucket=None,
-                currency=currency
-            )
-
-            table_a = None
-            fig = None
-            if isinstance(df, tuple) and len(df) == 2:
-                table_a, fig = df
-            else:
-                table_a = df
-                try:
-                    fig, ax = plt.subplots()
-                    pd.DataFrame(table_a).select_dtypes(include=[float, int]).plot(ax=ax)
-                except Exception:
-                    fig = None
-
-            st.markdown("**Table A**")
-            st.dataframe(pd.DataFrame(table_a) if not isinstance(table_a, pd.DataFrame) else table_a)
-            if fig is not None:
-                st.pyplot(fig, use_container_width=True)
-        except Exception as e:
-            st.exception(e)
+            try:
+                Report_Prepayment = data_model_prep(
+                    data_df,
+                    data_year_basis=8,
+                    start_date=pd.to_datetime(start),
+                    end_date=pd.to_datetime(end),
+                    excel=False
+                )
+                df = df_prepayment(Report_Prepayment, branch=None, product=None, time_bucket=None, currency=currency)
+                # Run the notebook's analysis cell logic
+                # We rely on kaplan_meier_estimator_custom and plotly imports already included
+                # Variables 'df', 'np', 'make_subplots', 'go' are available
+                # Execute prepayment analysis code in a local namespace
+                fig, table_a = run_km_prepayment(df)
+                st.subheader("Prepayment Survival Plot")
+                if fig is not None:
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No figure produced.")
+                st.subheader("Table A")
+                if isinstance(table_a, dict):
+                    table_a = pd.DataFrame(table_a)
+                st.dataframe(table_a, use_container_width=True)
+            except Exception as e:
+                st.exception(e)
 
 else:  # Early Withdrawal Analysis
-    st.subheader("Inputs")
-    start_date = st.text_input("start_date (ISO)", value="2017-01-01", key="ew_start")
-    end_date = st.text_input("end_date (ISO)", value="2025-12-31", key="ew_end")
-    currency = st.selectbox("currency", ["EUR", "USD", "TRY"], index=2, key="curr_ew")
-    product = st.text_input("product (e.g., 'Vadeli.Mevduat.Ticari')", value="Vadeli.Mevduat.Ticari")
-
-    holidays_file = st.file_uploader("Upload Turkey_Holidays.xlsx", type=["xlsx"], key="hol_ew")
-    data_file = st.file_uploader("Upload EARLY_WITHDRAWAL_DATA.xlsx", type=["xlsx"], key="data_ew")
-
-    if holidays_file and data_file and st.button("Run Early Withdrawal Analysis"):
-        holidays_df = pd.read_excel(holidays_file)
-        data_df = pd.read_excel(data_file)
-        data_df = _filter_by_date_range(data_df, start_date, end_date)
-        business_days = pd.date_range(start=start_date, end=end_date, freq='B')
-
-        # Try to build a report object via data_model if present; otherwise fall back to simple dict
-        try:
-            report = call_with_supported_kwargs(
-                data_model,
-                data_df,
-                data_year_basis=8,
-                start_date=start_date,
-                end_date=end_date,
-                excel=False,
-                business_days=business_days,
-                holidays=holidays_df
-            )
-        except Exception:
-            report = {"data": data_df, "holidays": holidays_df, "business_days": business_days}
-
-        try:
-            df = call_with_supported_kwargs(
-                df_early_withdrawal,
-                report,
-                branch=None,
-                product=product,
-                time_bucket=None,
-                currency=currency
-            )
-
-            table_a = None
-            fig = None
-            if isinstance(df, tuple) and len(df) == 2:
-                table_a, fig = df
-            else:
-                table_a = df
-                try:
-                    fig, ax = plt.subplots()
-                    pd.DataFrame(table_a).select_dtypes(include=[float, int]).plot(ax=ax)
-                except Exception:
-                    fig = None
-
-            st.markdown("**Table A**")
-            st.dataframe(pd.DataFrame(table_a) if not isinstance(table_a, pd.DataFrame) else table_a)
-            if fig is not None:
-                st.pyplot(fig, use_container_width=True)
-        except Exception as e:
-            st.exception(e)
-
+    data_file = st.file_uploader("Upload EARLY_WITHDRAWAL_DATA.xlsx", type=["xlsx"], key="ew")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        start_date = st.text_input("Start date (ISO)", "2017-01-01")
+    with col2:
+        end_date = st.text_input("End date (ISO)", "2025-12-31")
+    with col3:
+        currency = st.selectbox("Currency", ["EUR", "USD", "TRY"], index=2)
+    run = st.button("Run Early Withdrawal Analysis", type="primary", use_container_width=True)
+    if run:
+        if holidays_file is None or data_file is None:
+            st.error("Please upload both the Turkey Holidays file and the EARLY_WITHDRAWAL_DATA.xlsx file.")
+        else:
+            holidays_df = pd.read_excel(holidays_file)
+            data_df = pd.read_excel(data_file)
+            turkey_bd, monthly_bd = build_business_days(holidays_df, start_date, end_date)
+            globals()['Monthly_Business_Days'] = monthly_bd
+            try:
+                Report_Early_Withdrawal = data_model_ew(
+                    data_df,
+                    data_year_basis=None,
+                    start_date=pd.to_datetime(start_date),
+                    end_date=pd.to_datetime(end_date),
+                    excel=False
+                )
+                df = df_early_withdrawal(Report_Early_Withdrawal, branch=None, product='Vadeli.Mevduat.Ticari', time_bucket=None, currency=currency)
+                # Execute EW analysis cell logic
+                fig, table_a = run_km_early_withdrawal(df)
+                st.subheader("Early Withdrawal Survival Plot")
+                if fig is not None:
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No figure produced.")
+                st.subheader("Table A")
+                if isinstance(table_a, dict):
+                    table_a = pd.DataFrame(table_a)
+                st.dataframe(table_a, use_container_width=True)
+            except Exception as e:
+                st.exception(e)
