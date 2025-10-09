@@ -13,3 +13,4 @@ scikit-survival
 rich
 IPython
 panel
+nbformat
