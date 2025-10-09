@@ -737,19 +737,6 @@ def core_deposit_analysis_rolling(data,
 
 # === Prepayment helpers ===
 
-Turkey_Holidays = pd.read_excel(f"{wd_PRAM}/Turkey_Holidays.xlsx")
-Turkey_Holidays['TURKEY_HOLIDAYS'] = pd.to_datetime(Turkey_Holidays['TURKEY_HOLIDAYS'])
-
-Business_Days = pd.date_range(start="2017-01-01", end="2025-12-31", freq='B')
-Turkey_Business_Days = Business_Days[~Business_Days.isin(Turkey_Holidays['TURKEY_HOLIDAYS'])]
-
-Monthly_Business_Days = (
-    pd.DataFrame({"Business_Days": Turkey_Business_Days})
-    .assign(YearMonth=lambda df: df["Business_Days"].dt.to_period("M"))
-    .groupby("YearMonth")["Business_Days"]
-    .agg(["first", "last"])
-    .reset_index()
-)
 
 def next_business_day(date, holidays):
     next_day = date + timedelta(days=1)
