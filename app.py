@@ -8,6 +8,7 @@ from datetime import datetime
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -62,7 +63,7 @@ def patch_notebook_source(source: str, analysis: str, params: dict) -> str:
         patched = re.sub(r"\bdate_start\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]", "date_start = date_start", patched)
         patched = re.sub(r"\bdate_end\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]", "date_end = date_end", patched)
 
-    # Generic Windows path strip to basename for read_excel/read_csv
+    # Generic Windows path -> basename for pd.read_excel / read_csv
     patched = re.sub(
         r"pd\.(read_excel|read_csv)\(\s*([ru])?['\"]([A-Za-z]:\\\\[^'\"]+?\\\\([^'\"]+\.(xlsx|csv)))['\"]\s*\)",
         r"pd.\1('\4')",
@@ -73,8 +74,15 @@ def patch_notebook_source(source: str, analysis: str, params: dict) -> str:
 
 
 def execute_notebook_code(source: str, predefs: dict, workdir: str):
-    """Execute notebook code in isolated namespace, with path-redirect for uploads, and collect outputs."""
-    glb = {"__name__": "__notebook__", "__file__": os.path.join(workdir, "_injected_notebook.py")}
+    """Execute notebook code in isolated namespace, inject pd/np/plt, redirect filepaths, collect outputs."""
+    glb = {
+        "__name__": "__notebook__",
+        "__file__": os.path.join(workdir, "_injected_notebook.py"),
+        # Pre-inject common libs so early cells/functions can use them
+        "pd": pd,
+        "np": np,
+        "plt": plt,
+    }
     glb.update(predefs)
     lcl = {}
     old_cwd = os.getcwd()
@@ -91,8 +99,8 @@ def execute_notebook_code(source: str, predefs: dict, workdir: str):
         glb["display"] = display_stub
         glb["HTML"] = HTML
 
+        # Intercept pd.read_excel to map absolute paths -> uploaded basenames in workdir
         _orig_read_excel = pd.read_excel
-
         def _read_excel_intercept(path, *args, **kwargs):
             try:
                 base = os.path.basename(path) if isinstance(path, str) else path
@@ -102,7 +110,6 @@ def execute_notebook_code(source: str, predefs: dict, workdir: str):
             except Exception:
                 pass
             return _orig_read_excel(path, *args, **kwargs)
-
         pd.read_excel = _read_excel_intercept
 
         exec(compile(source, glb["__file__"], "exec"), glb, lcl)
@@ -131,7 +138,7 @@ def render_results(dataframes, figures):
 
 
 st.set_page_config(page_title="FRTB Analysis Suite", layout="wide")
-st.title("FRTB Analysis Suite (Auto‑Patch)")
+st.title("FRTB Analysis Suite (Auto‑Patch v2)")
 
 analysis = st.sidebar.selectbox(
     "Choose Analysis",
