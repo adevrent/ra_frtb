@@ -7,6 +7,19 @@ import plotly.graph_objects as go
 from sksurv.nonparametric import kaplan_meier_estimator
 from IPython.display import HTML, display
 
+# --- Helpers: column normalization (case/variant tolerant) ---
+def _ensure_columns(df, aliases):
+    # aliases: dict[target] = [candidates...]
+    cols = set(df.columns)
+    for target, cands in aliases.items():
+        if target not in df.columns:
+            for c in cands:
+                if c in df.columns:
+                    df[target] = df[c]
+                    break
+    return df
+
+
 def run_km_prepayment(df):
     time_points, survival_probabilities, confidence_interval, median_survival_time = kaplan_meier_estimator_custom(df)
 
@@ -1204,7 +1217,39 @@ if analysis == "Core Analysis":
         else:
             holidays_df = pd.read_excel(holidays_file)
             data_df = pd.read_excel(data_file)
+            # Normalize for Early Withdrawal Analysis
+            data_df = _ensure_columns(data_df, {
+                'REPORT_DATE': ['Report_Date','report_date','REPORT_DATE'],
+                'NOTIONAL': ['Notional','notional','NOTIONAL'],
+                'BRANCH': ['Branch','branch','BRANCH'],
+                'CURRENCY': ['Currency','currency','CURRENCY'],
+                'PRODUCT_CODE': ['Product_Code','product_code','PRODUCT_CODE'],
+                'TIME_BUCKET': ['Time_Bucket','time_bucket','TIME_BUCKET'],
+                'SURV_TIME': ['Survival_in_Days','surv_time','SURV_TIME'],
+                'Early_Withdrawal_Status': ['Status','status','Early_Withdrawal_Status','Early_Withdrawal'],
+            })
+
+            # Normalize for Prepayment Analysis
+            data_df = _ensure_columns(data_df, {
+                'REPORT_DATE': ['Report_Date','report_date','REPORT_DATE'],
+                'NOTIONAL': ['Notional','notional','NOTIONAL'],
+                'BRANCH': ['Branch','branch','BRANCH'],
+                'CURRENCY': ['Currency','currency','CURRENCY'],
+                'PRODUCT_CODE': ['Product_Code','product_code','PRODUCT_CODE'],
+                'TIME_BUCKET': ['Time_Bucket','time_bucket','TIME_BUCKET'],
+                'SURV_TIME': ['Survival_in_Days','surv_time','SURV_TIME'],
+                'Prepayment_Status': ['Status','status','Prepayment_Status'],
+            })
             # Ensure dates are datetime
+            # Normalize common column names for Core Analysis
+            data_df = _ensure_columns(data_df, {
+                'Currency': ['CURRENCY','currency'],
+                'Report_Date': ['REPORT_DATE','report_date','Report_Date'],
+                'Notional': ['NOTIONAL','notional'],
+                'Branch': ['BRANCH','branch'],
+                'Product_Code': ['PRODUCT_CODE','product_code','Product_Code'],
+                'Time_Bucket': ['TIME_BUCKET','time_bucket','Time_Bucket'],
+            })
             try:
                 data_df['REPORT_DATE'] = pd.to_datetime(data_df['REPORT_DATE'])
             except Exception:
