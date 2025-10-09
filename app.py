@@ -1,7 +1,7 @@
 
 import io
 import os
-import sys
+import re
 import json
 import tempfile
 from datetime import datetime
@@ -36,8 +36,44 @@ def load_notebook_source(nb_path: str) -> str:
     return "\n".join(src_parts)
 
 
+def patch_notebook_source(source: str, analysis: str, params: dict) -> str:
+    """Patch common hard-coded bits so the notebook consumes UI params without manual edits."""
+    patched = source
+
+    if analysis == "Prepayment Analysis":
+        patched = re.sub(
+            r"Business_Days\s*=\s*pd\.date_range\(\s*start\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]\s*,\s*end\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]\s*,\s*freq\s*=\s*['\"]B['\"]\s*\)",
+            "Business_Days = pd.date_range(start=start, end=end, freq='B')",
+            patched
+        )
+        patched = re.sub(r"start_date\s*=\s*(None|['\"]\d{4}-\d{2}-\d{2}['\"])", "start_date=start_date", patched)
+        patched = re.sub(r"end_date\s*=\s*(None|['\"]\d{4}-\d{2}-\d{2}['\"])", "end_date=end_date", patched)
+
+    elif analysis == "Early Withdrawal Analysis":
+        patched = re.sub(
+            r"Business_Days\s*=\s*pd\.date_range\(\s*start\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]\s*,\s*end\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]\s*,\s*freq\s*=\s*['\"]B['\"]\s*\)",
+            "Business_Days = pd.date_range(start=start_date, end=end_date, freq='B')",
+            patched
+        )
+        patched = re.sub(r"\bstart_date\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]", "start_date = start_date", patched)
+        patched = re.sub(r"\bend_date\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]", "end_date = end_date", patched)
+
+    elif analysis == "Core Analysis":
+        patched = re.sub(r"\bdate_start\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]", "date_start = date_start", patched)
+        patched = re.sub(r"\bdate_end\s*=\s*['\"]\d{4}-\d{2}-\d{2}['\"]", "date_end = date_end", patched)
+
+    # Generic Windows path strip to basename for read_excel/read_csv
+    patched = re.sub(
+        r"pd\.(read_excel|read_csv)\(\s*([ru])?['\"]([A-Za-z]:\\\\[^'\"]+?\\\\([^'\"]+\.(xlsx|csv)))['\"]\s*\)",
+        r"pd.\1('\4')",
+        patched
+    )
+
+    return patched
+
+
 def execute_notebook_code(source: str, predefs: dict, workdir: str):
-    """Execute notebook code inside isolated namespace and return dataframes and figures."""
+    """Execute notebook code in isolated namespace, with path-redirect for uploads, and collect outputs."""
     glb = {"__name__": "__notebook__", "__file__": os.path.join(workdir, "_injected_notebook.py")}
     glb.update(predefs)
     lcl = {}
@@ -45,17 +81,35 @@ def execute_notebook_code(source: str, predefs: dict, workdir: str):
 
     try:
         os.chdir(workdir)
-        from IPython.display import HTML
 
+        try:
+            from IPython.display import HTML
+        except Exception:
+            class HTML(str): pass
         def display_stub(*args, **kwargs):
             return None
-
         glb["display"] = display_stub
         glb["HTML"] = HTML
 
-        exec(compile(source, glb["__file__"], "exec"), glb, lcl)
-        ns = {**glb, **lcl}
+        _orig_read_excel = pd.read_excel
 
+        def _read_excel_intercept(path, *args, **kwargs):
+            try:
+                base = os.path.basename(path) if isinstance(path, str) else path
+                candidate = os.path.join(workdir, base) if isinstance(base, str) else None
+                if isinstance(candidate, str) and os.path.exists(candidate):
+                    return _orig_read_excel(candidate, *args, **kwargs)
+            except Exception:
+                pass
+            return _orig_read_excel(path, *args, **kwargs)
+
+        pd.read_excel = _read_excel_intercept
+
+        exec(compile(source, glb["__file__"], "exec"), glb, lcl)
+
+        pd.read_excel = _orig_read_excel
+
+        ns = {**glb, **lcl}
         dataframes = [(k, v) for k, v in ns.items() if isinstance(v, pd.DataFrame)]
         figures = [plt.figure(num) for num in plt.get_fignums()]
         return ns, dataframes, figures
@@ -77,7 +131,7 @@ def render_results(dataframes, figures):
 
 
 st.set_page_config(page_title="FRTB Analysis Suite", layout="wide")
-st.title("FRTB Analysis Suite (Streamlit)")
+st.title("FRTB Analysis Suite (Auto‑Patch)")
 
 analysis = st.sidebar.selectbox(
     "Choose Analysis",
@@ -161,6 +215,8 @@ if run:
         st.stop()
 
     source = load_notebook_source(nb_path)
+    source = patch_notebook_source(source, analysis, params)
+
     predefs = {}
     predefs.update(params)
 
