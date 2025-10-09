@@ -1,202 +1,333 @@
 
-# app.py (v3) — fix: resolve script absolute path before chdir(tmpdir)
-import os
 import io
-import runpy
-import tempfile
-import contextlib
+import os
+import re
+import sys
+import json
+import shutil
 import types
-from typing import List, Dict, Any
+import tempfile
+import traceback
+from datetime import datetime
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 
-st.set_page_config(page_title="Deposit Analytics Suite", layout="wide")
-st.title("📊 Deposit Analytics Suite")
+# Optional imports guarded to keep app resilient
+try:
+    import nbformat
+except Exception:
+    nbformat = None
 
-st.write(
-    "Analiz türünü seçin, **Turkey_Holidays.xlsx** ve ilgili **DATA** dosyasını yükleyin. "
-    "Uygulama scripti kendi akışında çalıştırır ve grafik/tablo çıktısını ekranda gösterir."
-)
+import matplotlib
+matplotlib.use("Agg")  # headless backend
+import matplotlib.pyplot as plt
 
-with st.sidebar:
-    st.header("⚙️ Ayarlar")
-    analysis_choice = st.radio(
-        "Analiz Türü",
-        ["Core Analysis", "Early Withdrawal Analysis", "Prepayment Analysis"],
-        index=0,
-    )
+# -----------------------------
+# Utilities
+# -----------------------------
 
-    holidays_file = st.file_uploader("Turkey_Holidays.xlsx yükleyin", type=["xlsx"])
+def save_uploaded_file(uploaded_file, target_path: str):
+    \"\"\"Save a Streamlit UploadedFile to the given target_path.\"\"\"
+    with open(target_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
 
-    data_label = {
-        "Core Analysis": "CORE_DEPOSIT_DATA.xlsx",
-        "Early Withdrawal Analysis": "EARLY_WITHDRAWAL_DATA.xlsx",
-        "Prepayment Analysis": "PREPAYMENT_DATA.xlsx",
-    }[analysis_choice]
+def load_notebook_source(nb_path: str) -> str:
+    \"\"\"Read a .ipynb and concatenate all code cells into a single Python source string.\"\"\"
+    if nbformat is None:
+        raise RuntimeError("nbformat is not installed. Please `pip install nbformat`.")
+    nb = nbformat.read(nb_path, as_version=4)
+    code_cells = [cell for cell in nb.cells if cell.get("cell_type") == "code"]
+    src_parts = []
+    for cell in code_cells:
+        # Keep cell boundaries as comments to ease debugging if needed
+        src_parts.append(\"\"\"\\n# ---- NOTEBOOK CELL ----\\n\"\"\" + (cell.get("source") or ""))
+    return "\\n".join(src_parts)
 
-    data_file = st.file_uploader(f"{data_label} yükleyin", type=["xlsx"])
+def execute_notebook_code(source: str, predefs: dict, workdir: str):
+    \"\"\"Execute notebook source inside an isolated namespace.
+    - Inject `predefs` into the globals.
+    - Run inside `workdir` (so relative reads/writes land in our temp area).
+    - Capture any created DataFrames and matplotlib figures.
+    Returns: (namespace, dataframes, figures)
+    \"\"\"
+    # Prepare isolated globals/locals
+    glb = {
+        "__name__": "__notebook__",
+        "__file__": os.path.join(workdir, "_injected_notebook.py"),
+    }
+    glb.update(predefs)
 
-    run_btn = st.button("🚀 Analizi Çalıştır")
+    lcl = {}
 
-SCRIPT_PATHS = {
-    "Core Analysis": "core_analysis.py",
-    "Early Withdrawal Analysis": "early_withdrawal_analysis.py",
-    "Prepayment Analysis": "prepayment_analysis.py",
-}
-
-st.info(
-    "Bu sürüm, dosyaları geçici klasöre yazar ve çalışma esnasında o klasöre **chdir** eder. "
-    "Ayrıca script dosyasının **mutlak yolunu** chdir'den önce çözümler; böylece "
-    "run sırasında `.../core_analysis.py` bulunamama hatası yaşanmaz."
-)
-
-# --- Helpers to capture display/fig outputs ---
-def _patch_ipython_display(captured_html: List[str]):
-    ipy = types.ModuleType("IPython")
-    disp = types.ModuleType("IPython.display")
-
-    class HTML:
-        def __init__(self, data): self.data = data
-        def __str__(self): return str(self.data)
-    class Markdown:
-        def __init__(self, data): self.data = data
-        def __str__(self): return str(self.data)
-
-    def display(obj):
-        s = getattr(obj, "data", obj)
-        captured_html.append(str(s))
-
-    disp.HTML = HTML
-    disp.Markdown = Markdown
-    disp.display = display
-    ipy.display = disp
-
-    import sys
-    sys.modules["IPython"] = ipy
-    sys.modules["IPython.display"] = disp
-
-def _patch_plotly_capture(captured_figs: List[object]):
-    try:
-        import plotly.graph_objects as go
-        def patched_show(self, *args, **kwargs):
-            captured_figs.append(self)
-            return None
-        go.Figure.show = patched_show  # type: ignore
-    except Exception:
-        pass
-
-def _patch_matplotlib_noop():
-    try:
-        import matplotlib.pyplot as plt
-        def _noop_show(*args, **kwargs): return None
-        plt.show = _noop_show  # type: ignore
-    except Exception:
-        pass
-
-def run_script_in_tmp(script_path: str, tmpdir: str, analysis_choice: str):
-    # Resolve script absolute path BEFORE changing directory
-    script_abs = os.path.abspath(script_path)
-
-    # Set file names we will write into tmpdir
-    holidays_basename = "Turkey_Holidays.xlsx"
-    data_basename = {
-        "Core Analysis": "CORE_DEPOSIT_DATA.xlsx",
-        "Early Withdrawal Analysis": "EARLY_WITHDRAWAL_DATA.xlsx",
-        "Prepayment Analysis": "PREPAYMENT_DATA.xlsx",
-    }[analysis_choice]
-
-    holidays_path = os.path.join(tmpdir, holidays_basename)
-    data_path = os.path.join(tmpdir, data_basename)
-
-    # Set environment variables expected by the scripts (optional but helpful)
-    os.environ["TURKEY_HOLIDAYS_PATH"] = holidays_path
-    if analysis_choice == "Core Analysis":
-        os.environ["CORE_DEPOSIT_DATA_PATH"] = data_path
-    elif analysis_choice == "Early Withdrawal Analysis":
-        os.environ["EARLY_WITHDRAWAL_DATA_PATH"] = data_path
-    else:
-        os.environ["PREPAYMENT_DATA_PATH"] = data_path
-
-    captured_html: List[str] = []
-    captured_figs: List[object] = []
-
-    _patch_ipython_display(captured_html)
-    _patch_plotly_capture(captured_figs)
-    _patch_matplotlib_noop()
-
-    # Run with CWD = tmpdir so relative basenames resolve
+    # Make sure relative paths work within temp workdir
     old_cwd = os.getcwd()
     try:
-        os.chdir(tmpdir)
-        with contextlib.redirect_stdout(io.StringIO()):
-            globs = runpy.run_path(script_abs, run_name="__main__")
+        os.chdir(workdir)
+        # Provide no-op display/HTML so notebook calls don't crash
+        try:
+            from IPython.display import HTML
+        except Exception:
+            class HTML(str):
+                pass
+        def _display_stub(*args, **kwargs):
+            # We don't render IPython display() here; Streamlit will render DataFrames/figures later.
+            return None
+        glb["display"] = _display_stub
+        glb["HTML"] = HTML
+
+        # Snapshot objects before exec to detect new DataFrames
+        before_keys = set(glb.keys()) | set(lcl.keys())
+
+        # Actually execute the notebook code
+        exec(compile(source, glb["__file__"], "exec"), glb, lcl)
+
+        # Merge dicts (objects may be assigned into locals)
+        ns = {}
+        ns.update(glb)
+        ns.update(lcl)
+
+        # Collect newly created DataFrames
+        new_keys = set(ns.keys()) - before_keys
+        dataframes = []
+        for k in sorted(new_keys):
+            obj = ns[k]
+            if isinstance(obj, pd.DataFrame):
+                dataframes.append((k, obj))
+
+        # Collect current matplotlib figures
+        figures = []
+        for num in plt.get_fignums():
+            figures.append(plt.figure(num))
+
+        return ns, dataframes, figures
     finally:
         os.chdir(old_cwd)
 
-    return globs, captured_figs, captured_html
+def render_results(dataframes, figures):
+    \"\"\"Render collected DataFrames and figures in Streamlit.\"\"\"
+    if figures:
+        st.subheader("Generated Plots")
+        for i, fig in enumerate(figures, start=1):
+            st.pyplot(fig, clear_figure=False)
 
-def _display_results(globs: Dict[str, Any], captured_figs: List[object], captured_html: List[str]):
-    # 1) Try to find a plotly Figure either as global "fig" or via captured .show()
-    fig = globs.get("fig", None)
-    if fig is None and captured_figs:
-        fig = captured_figs[-1]
-    if fig is not None:
-        st.subheader("📈 Grafik")
-        try:
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.warning(f"Plotly grafiği çizilemedi: {e}")
-
-    # 2) DataFrames (globals)
-    tables = {}
-    for key, val in globs.items():
-        if isinstance(val, pd.DataFrame):
-            name_low = key.lower()
-            if key in ("table_a", "table_b", "table_c") or any(tok in name_low for tok in ("analysis", "summary", "result")):
-                tables[key] = val
-
-    # 3) HTML tables captured via display(HTML(...))
-    for html in captured_html:
-        if "<table" in html.lower():
-            try:
-                dfs = pd.read_html(html)
-                for i, df in enumerate(dfs, start=1):
-                    tables[f"html_table_{i}_{len(tables)+i}"] = df
-            except Exception:
-                pass
-
-    if tables:
-        st.subheader("🧾 Tablolar")
-        for name, df in tables.items():
+    if dataframes:
+        st.subheader("Generated Tables")
+        for name, df in dataframes:
             st.markdown(f"**{name}**")
             st.dataframe(df, use_container_width=True)
-    else:
-        st.info("Gösterilecek tablo yakalanamadı. (Script tablo üretmemiş olabilir.)")
 
-if run_btn:
-    if not holidays_file or not data_file:
-        st.error("Lütfen **Turkey_Holidays.xlsx** ve seçtiğiniz analize ait **DATA** dosyasını yükleyin.")
-    else:
-        script_file = SCRIPT_PATHS[analysis_choice]
-        if not os.path.exists(script_file):
-            st.error(f"Script bulunamadı: {script_file}. `app.py` ile aynı klasörde olmalı.")
-        else:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                # Save uploads into tmpdir with the exact basenames the scripts expect
-                with open(os.path.join(tmpdir, "Turkey_Holidays.xlsx"), "wb") as f:
-                    f.write(holidays_file.getbuffer())
-                with open(os.path.join(tmpdir, data_label), "wb") as f:
-                    f.write(data_file.getbuffer())
 
-                st.success("Analiz başlatıldı. Script çalıştırılıyor...")
-                try:
-                    globs, cap_figs, cap_html = run_script_in_tmp(
-                        script_path=script_file,
-                        tmpdir=tmpdir,
-                        analysis_choice=analysis_choice,
-                    )
-                    _display_results(globs, cap_figs, cap_html)
-                    st.success("Analiz tamamlandı.")
-                except Exception as e:
-                    st.error(f"Çalışma sırasında bir hata oluştu:\n\n{e}")
+# -----------------------------
+# Sidebar: Analysis Picker & Inputs
+# -----------------------------
+st.set_page_config(page_title="FRTB Analysis Suite", layout="wide")
+st.title("FRTB Analysis Suite (Streamlit)")
+
+analysis = st.sidebar.selectbox(
+    "Choose Analysis",
+    ["Core Analysis", "Prepayment Analysis", "Early Withdrawal Analysis"]
+)
+
+st.sidebar.markdown("---")
+st.sidebar.header("Upload Required Files")
+
+# Common: Turkey Holidays (required for all)
+holidays_file = st.sidebar.file_uploader("Turkey_Holidays.xlsx", type=["xlsx"])
+
+# Data file varies by analysis
+if analysis == "Core Analysis":
+    data_label = "CORE_DEPOSIT_DATA.xlsx"
+elif analysis == "Prepayment Analysis":
+    data_label = "PREPAYMENT_DATA.xlsx"
+else:
+    data_label = "EARLY_WITHDRAWAL_DATA.xlsx"
+
+data_file = st.sidebar.file_uploader(data_label, type=["xlsx"])
+
+st.sidebar.markdown("---")
+st.sidebar.header("Parameters")
+
+# Parameter inputs per analysis
+params = {}
+if analysis == "Core Analysis":
+    params["date_start"] = st.sidebar.text_input("date_start (YYYY-MM-DD)", "2017-01-01")
+    params["date_end"]   = st.sidebar.text_input("date_end (YYYY-MM-DD)", "2018-01-01")
+    params["currency"]   = st.sidebar.selectbox("currency", ["USD", "EUR", "TRY"], index=2)
+    params["freq"]       = st.sidebar.selectbox("freq", ["W", "M", "Y"], index=1)
+    params["type"]       = st.sidebar.selectbox("type", ["mean", "roll"], index=0)
+
+    # Not entered by user (forced None)
+    params["branch"]      = None
+    params["product"]     = None
+    params["time_bucket"] = None
+
+elif analysis == "Prepayment Analysis":
+    params["start"]     = st.sidebar.text_input("Business_Days start (YYYY-MM-DD)", "2017-01-01")
+    params["end"]       = st.sidebar.text_input("Business_Days end (YYYY-MM-DD)",   "2025-12-31")
+    params["currency"]  = st.sidebar.selectbox("currency", ["EUR", "USD", "TRY"], index=2)
+
+    # Derived / mirrored params for data_model()
+    params["start_date"] = params["start"]
+    params["end_date"]   = params["end"]
+
+elif analysis == "Early Withdrawal Analysis":
+    params["start_date"] = st.sidebar.text_input("start_date (YYYY-MM-DD)", "2017-01-01")
+    params["end_date"]   = st.sidebar.text_input("end_date (YYYY-MM-DD)",   "2025-12-31")
+    params["currency"]   = st.sidebar.selectbox("currency", ["EUR", "USD", "TRY"], index=2)
+    params["product"]    = st.sidebar.text_input("product", "Vadeli.Mevduat.Ticari")  # user input allowed
+    # Fixed None for others
+    params["branch"]      = None
+    params["time_bucket"] = None
+
+st.sidebar.markdown("---")
+
+run = st.sidebar.button("Run Analysis")
+
+# -----------------------------
+# Execution
+# -----------------------------
+NOTEBOOK_FILES = {
+    "Core Analysis": "Core Analysis - Demand Deposit.ipynb",
+    "Prepayment Analysis": "Prepayment Analysis.ipynb",
+    "Early Withdrawal Analysis": "Early Withdrawal Analysis.ipynb",
+}
+
+EXPECTED_FILENAMES = {
+    "Core Analysis": ["Turkey_Holidays.xlsx", "CORE_DEPOSIT_DATA.xlsx"],
+    "Prepayment Analysis": ["Turkey_Holidays.xlsx", "PREPAYMENT_DATA.xlsx"],
+    "Early Withdrawal Analysis": ["Turkey_Holidays.xlsx", "EARLY_WITHDRAWAL_DATA.xlsx"],
+}
+
+if run:
+    # Validate uploads
+    missing = []
+    if holidays_file is None:
+        missing.append("Turkey_Holidays.xlsx")
+    if data_file is None:
+        missing.append(data_label)
+
+    if missing:
+        st.error(f"Please upload the required file(s): {', '.join(missing)}")
+        st.stop()
+
+    # Create a per-run temp directory and save uploads with the expected exact names
+    workdir = tempfile.mkdtemp(prefix="frtb_run_")
+    st.info(f"Working in: {workdir}")
+
+    expected_names = EXPECTED_FILENAMES[analysis]
+    try:
+        # Save Turkey_Holidays.xlsx
+        save_uploaded_file(holidays_file, os.path.join(workdir, expected_names[0]))
+        # Save data file as the exact expected name for the chosen analysis
+        save_uploaded_file(data_file, os.path.join(workdir, expected_names[1]))
+    except Exception as e:
+        st.error(f"Failed to save uploaded files: {e}")
+        st.stop()
+
+    # Load notebook source
+    nb_path = os.path.join(os.getcwd(), NOTEBOOK_FILES[analysis])
+    if not os.path.exists(nb_path):
+        st.error(f"Notebook not found: {NOTEBOOK_FILES[analysis]}. "
+                 f"Place it in the same folder as this app.")
+        st.stop()
+
+    try:
+        source = load_notebook_source(nb_path)
+    except Exception as e:
+        st.error("Error reading notebook: " + str(e))
+        st.stop()
+
+    # Prepare predefinitions injected into the notebook's global namespace
+    predefs = {}
+
+    if analysis == "Core Analysis":
+        # Vars expected by your notebook cells
+        predefs.update({
+            "date_start": params["date_start"],
+            "date_end":   params["date_end"],
+            "branch":     params["branch"],
+            "product":    params["product"],
+            "time_bucket":params["time_bucket"],
+            "currency":   params["currency"],
+            "freq":       params["freq"],
+            "type":       params["type"],
+            # In case your code reads these standard filenames:
+            "HOLIDAYS_XLSX": "Turkey_Holidays.xlsx",
+            "CORE_DATA_XLSX": "CORE_DEPOSIT_DATA.xlsx",
+        })
+
+    elif analysis == "Prepayment Analysis":
+        predefs.update({
+            # Business_Days range
+            "start": params["start"],
+            "end":   params["end"],
+            # data_model mirror vars
+            "start_date": params["start_date"],
+            "end_date":   params["end_date"],
+            # df_prepayment currency
+            "currency": params["currency"],
+            # Common expected filenames
+            "HOLIDAYS_XLSX": "Turkey_Holidays.xlsx",
+            "PREPAYMENT_DATA_XLSX": "PREPAYMENT_DATA.xlsx",
+        })
+
+    elif analysis == "Early Withdrawal Analysis":
+        predefs.update({
+            "start_date": params["start_date"],
+            "end_date":   params["end_date"],
+            "currency":   params["currency"],
+            "product":    params["product"],
+            "branch":     params["branch"],
+            "time_bucket":params["time_bucket"],
+            # Expected filenames
+            "HOLIDAYS_XLSX": "Turkey_Holidays.xlsx",
+            "EARLY_WITHDRAWAL_DATA_XLSX": "EARLY_WITHDRAWAL_DATA.xlsx",
+        })
+
+    # Execute the notebook code with our injected params inside the temp workdir
+    try:
+        ns, dfs, figs = execute_notebook_code(source, predefs, workdir)
+    except Exception as e:
+        st.error("Error while executing notebook. See traceback below.")
+        st.exception(e)
+        st.stop()
+
+    # Heuristics:
+    # If the notebook created a variable named `table_a` and it's a DataFrame, show it first.
+    prioritized = []
+    rest = []
+    seen = set()
+    for name, df in dfs:
+        if name == "table_a":
+            prioritized.append((name, df))
+            seen.add(name)
+    for name, df in dfs:
+        if name not in seen:
+            rest.append((name, df))
+
+    render_results(prioritized + rest, figs)
+
+    # Friendly hint about where outputs landed (in case the notebook writes files)
+    with st.expander("Run details & outputs"):
+        st.code(json.dumps({
+            "workdir": workdir,
+            "written_files": sorted(os.listdir(workdir))
+        }, indent=2))
+
+    st.success("Analysis complete.")
+else:
+    st.markdown(
+        \"\"\"
+        **Instructions**  
+        1. Pick an analysis on the left.  
+        2. Upload **Turkey_Holidays.xlsx** and the matching data file shown.  
+        3. Provide the parameters.  
+        4. Click **Run Analysis**.  
+        
+        This app will run your original Jupyter notebook logic using only the uploaded files
+        (saved with the exact filenames your notebooks expect), and render any resulting plots
+        and tables (e.g., `table_a`) right here.
+        \"\"\"
+    )
