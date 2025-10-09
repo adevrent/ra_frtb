@@ -319,7 +319,7 @@ if run:
     st.success("Analysis complete.")
 else:
     st.markdown(
-        \"\"\"
+        """
         **Instructions**  
         1. Pick an analysis on the left.  
         2. Upload **Turkey_Holidays.xlsx** and the matching data file shown.  
@@ -329,5 +329,5 @@ else:
         This app will run your original Jupyter notebook logic using only the uploaded files
         (saved with the exact filenames your notebooks expect), and render any resulting plots
         and tables (e.g., `table_a`) right here.
-        \"\"\"
+        """
     )
