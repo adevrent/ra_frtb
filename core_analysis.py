@@ -44,7 +44,7 @@ warnings.simplefilter('ignore')
 
 # Variables
 
-if __name__ = = "__main__":
+if __name__ == "__main__":
     start_date = "2017-01-01"  # ENTERED BY USER
     end_date = "2025-12-31"  # ENTERED BY USER
 
@@ -702,10 +702,10 @@ Report_Core_Deposit = (Report_Core_Deposit.groupby(['Report_Date','Branch', 'Cus
                            .reset_index(drop=True))
 Report_Core_Deposit = Report_Core_Deposit[Report_Core_Deposit['Notional']>0]
 
-if __name__ = = "__main__":
+if __name__ == "__main__":
     core_deposit_analysis(Report_Core_Deposit, 
-                        branch = None, 
-                        product = "Vadesiz.Mevduat.Ticari",
-                        time_bucket = None,
-                        currency = 'TRY',
-                        freq = 'W', type = 'mean', nsim = 100000, excel = False, plot = True)
+                        branch = branch, 
+                        product = product,
+                        time_bucket = time_bucket,
+                        currency = currency,
+                        freq = freq, type = 'mean', nsim = 100000, excel = False, plot = True)
