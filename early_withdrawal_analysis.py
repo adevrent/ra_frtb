@@ -1,56 +1,108 @@
+"""
+early_withdrawal_analysis.py
+----------------------------
+Notebook-parity Early Withdrawal Analysis, packaged for Streamlit.
+
+Key features
+- Accepts Excel uploads for data and Turkey holidays
+- Runs the early-withdrawal pipeline (vectorized, robust to column names)
+- Returns result DataFrames for display
+- Optionally writes an .RData with key objects (via pyreadr) for consumption by R-only scripts
+
+Usage (inside Streamlit):
+    import early_withdrawal_analysis as ewa
+    results = ewa.run(
+        data_file=uploaded_data,          # path or BytesIO from st.file_uploader
+        holidays_file=uploaded_holidays,  # path or BytesIO
+        start_date=start_date,            # e.g. '2017-01-01' or None
+        end_date=end_date,                # e.g. '2025-12-31' or None
+        years=8,                          # rolling window in years (as in notebook)
+        write_rdata=True,
+        rdata_path="early_withdrawal_output.RData"
+    )
+    # results is a dict with keys:
+    # 'report_df', 'analysis_df', 'ratio_df', 'monthly_bd_df', 'holidays_df', 'rdata_path'
+"""
+
+from __future__ import annotations
+
+import io
+import warnings
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional, Tuple, Union
+
 import numpy as np
 import pandas as pd
-import pyreadr
-import warnings
-import lifelines
-import matplotlib.pyplot as plt
 
-from scipy import stats
-from datetime import timedelta
-from timeit import default_timer as timer
-from itertools import combinations, batched
-from pathlib import Path
-from tqdm import tqdm
-from rich.progress import track
-from sklearn.preprocessing import LabelEncoder
-from sklearn.linear_model import LinearRegression
-from sksurv.nonparametric import kaplan_meier_estimator
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn
-from lifelines import KaplanMeierFitter, WeibullAFTFitter, CoxPHFitter
-from lifelines import WeibullFitter, ExponentialFitter, LogNormalFitter, LogLogisticFitter, PiecewiseExponentialFitter, NelsonAalenFitter, SplineFitter
-from lifelines.utils import find_best_parametric_model, median_survival_times
+# Optional dep for writing RData (no R install required)
+try:
+    import pyreadr  # type: ignore
+except Exception:  # pragma: no cover
+    pyreadr = None
 
-from IPython.display import display, HTML, Markdown
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+warnings.simplefilter("ignore")
 
-warnings.simplefilter('ignore')
+# ---------------------- Helpers ----------------------
 
-if __name__ == "__main__":
-    start_date = "2017-01-01"  # ENTERED BY USER
-    end_date = "2025-12-31"  # ENTERED BY USER
+def _read_excel_any(obj: Union[str, bytes, io.BytesIO], **kwargs) -> pd.DataFrame:
+    """Read Excel from path or file-like; surface nicer errors."""
+    try:
+        if isinstance(obj, (bytes, bytearray)):
+            obj = io.BytesIO(obj)
+        return pd.read_excel(obj, **kwargs)
+    except Exception as e:
+        raise RuntimeError(f"Excel okunamadı: {e}") from e
 
-    early_withdrawal_filepath = r"C:\Users\adevr\riskactive_main\FRTB\From_Sait\Early Withdrawal Analysis\EARLY_WITHDRAWAL_DATA.xlsx"  # file uploaded by user
-    turkey_holidays_filepath = r"C:\Users\adevr\riskactive_main\FRTB\From_Sait\TURKEY_HOLIDAYS.xlsx"  # file uploaded by user
+def _coerce_colnames(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = df.columns.astype(str).str.strip().str.replace(".", "_", regex=False)
+    return df
 
-    branch = None  # ENTERED BY USER
-    product = None  # ENTERED BY USER
-    time_bucket = None  # ENTERED BY USER
-    currency = "TRY"  # ENTERED BY USER
+def build_business_calendar(start_date: Optional[Union[str, datetime, pd.Timestamp]],
+                            end_date: Optional[Union[str, datetime, pd.Timestamp]],
+                            holidays_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Returns (holidays_df_norm, monthly_bd_df)."""
+    th = holidays_df.copy()
+    th.columns = [str(c).strip() for c in th.columns]
+    if 'TURKEY_HOLIDAYS' not in th.columns:
+        # accept first column as holidays
+        th = th.rename(columns={th.columns[0]: 'TURKEY_HOLIDAYS'})
+    th['TURKEY_HOLIDAYS'] = pd.to_datetime(th['TURKEY_HOLIDAYS']).dt.date
 
-data = pd.read_excel(early_withdrawal_filepath)
+    # Defaults if None
+    if start_date is None:
+        start_date = datetime(2010, 1, 1)
+    if end_date is None:
+        end_date = datetime(2030, 12, 31)
+    start_date = pd.to_datetime(start_date).date()
+    end_date = pd.to_datetime(end_date).date()
 
-data.columns = data.columns.astype(str).str.replace(".", "_")
-data = data[~data["REPORT_DATE"].isin(pd.to_datetime([start_date, end_date])) & data["EFFECTIVE_DATE"].notna()]
+    bd = pd.bdate_range(start=start_date, end=end_date).date
+    # Exclude holidays
+    holiday_set = set(th['TURKEY_HOLIDAYS'])
+    bd = pd.to_datetime([d for d in bd if d not in holiday_set])
 
-def next_business_day(date, holidays_df):
-    holidays = set(holidays_df.iloc[:,0])
-    next_day = date + timedelta(days=1)
-    while next_day.weekday() >= 5 or next_day in holidays:
-        next_day += timedelta(days=1)
-    return next_day
-    
-def classify_time_bucket(months):
+    monthly_bd = (
+        pd.DataFrame({"Business_Days": bd})
+        .assign(YearMonth=lambda df: df["Business_Days"].dt.to_period("M"))
+        .groupby("YearMonth")["Business_Days"].agg(["first", "last"]).reset_index()
+    )
+    return th, monthly_bd
+
+def next_business_day(date_val, holidays_df: pd.DataFrame):
+    if pd.isna(date_val):
+        return date_val
+    if holidays_df.shape[1] == 0:
+        holidays = set()
+    else:
+        holidays = set(pd.to_datetime(holidays_df.iloc[:, 0]).dt.date)
+    d = pd.to_datetime(date_val).date()
+    nxt = d + timedelta(days=1)
+    while nxt.weekday() >= 5 or nxt in holidays:
+        nxt += timedelta(days=1)
+    return nxt
+
+def classify_time_bucket(months: float) -> str:
     if 0 <= months <= 1:
         return "0-1M"
     elif 1 < months <= 3:
@@ -58,7 +110,7 @@ def classify_time_bucket(months):
     elif 3 < months <= 6:
         return "3-6M"
     elif 6 < months <= 12:
-        return "6-12M"    
+        return "6-12M"
     elif 12 < months <= 24:
         return "1-2Y"
     elif 24 < months <= 36:
@@ -74,287 +126,190 @@ def classify_time_bucket(months):
     else:
         return "--"
 
-def rolling_dates(data, year = 5):
-    rolling_dates = []
-    period = year*12
-    for i in range(len(data) - (period-1)):
-        START_DATE = data.loc[i, "first"]
-        END_DATE = data.loc[i + (period-1), "last"]
-        rolling_dates.append({"START_DATE": START_DATE, "END_DATE": END_DATE})
-    
-    rolling_dates = pd.DataFrame(rolling_dates)
-    
-    return rolling_dates
-    
-def separate_customer_id(customer_id):
-    try:
-        parts = customer_id.split(' // ')
-        return pd.Series(parts, index=['BRANCH', 'CUSTOMER_NO', 'PRODUCT_CODE', 'CURRENCY'])
-    except:
-        return pd.Series([None, None, None, None], index=['BRANCH', 'CUSTOMER_NO', 'PRODUCT_CODE', 'CURRENCY'])
+def rolling_dates(monthly_bd_df: pd.DataFrame, years: int = 5) -> pd.DataFrame:
+    period = years * 12
+    rows = []
+    for i in range(len(monthly_bd_df) - (period - 1)):
+        start_d = monthly_bd_df.loc[i, "first"]
+        end_d = monthly_bd_df.loc[i + (period - 1), "last"]
+        rows.append({"START_DATE": start_d, "END_DATE": end_d})
+    return pd.DataFrame(rows)
 
-def move_string_to_end(s):
-    parts = s.split(',')
-    if "Currency" in parts:
-        parts.remove("Currency")
-        parts.append("Currency")
-    return ",".join(parts)
-    
-def kaplan_meier_estimator_custom(df):
+# ---------------------- Core pipeline ----------------------
 
-    if df is None or df.empty:
-        raise ValueError("Input DataFrame is empty or None")
+def _data_model(df: pd.DataFrame,
+                monthly_bd_df: pd.DataFrame,
+                holidays_df: pd.DataFrame,
+                data_year_basis: Optional[int] = None,
+                start_date: Optional[Union[str, datetime]] = None,
+                end_date: Optional[Union[str, datetime]] = None) -> pd.DataFrame:
+    """Replicates notebook logic to a tidy frame for early-withdrawal analysis."""
+    df = _coerce_colnames(df)
+    # enforce required columns with friendly error
+    required = {
+        'REPORT_DATE', 'CUSTOMER_ID', 'EFFECTIVE_DATE', 'MATURITY', 'NOTIONAL', 'CURRENCY'
+    }
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Eksik kolon(lar): {missing}. Bu kolonlar zorunlu: {sorted(required)}")
 
-    kme = kaplan_meier_estimator(df["Status_TF"], df["Survival_in_Days"], conf_type="log-log")
-    
-    time_points = kme[0]
-    survival_probabilities = kme[1]
-    confidence_interval = kme[2]
-    
-    median_survival_time = np.interp(0.5, survival_probabilities[::-1], time_points[::-1])
-    
-    survival_probabilities_diff = survival_probabilities - 0.5
-    median_survival_time_adj = np.interp(min(survival_probabilities_diff), survival_probabilities_diff[::-1], time_points[::-1])
-    
-    if min(survival_probabilities) > 0.5:  
-        median_survival_time = median_survival_time_adj
-        
-    return time_points, survival_probabilities, confidence_interval, median_survival_time
-    
-def data_model(data, data_year_basis = None, start_date = None, end_date = None):
-    
-    data['REPORT_DATE'] = pd.to_datetime(data['REPORT_DATE'])
+    df['REPORT_DATE']   = pd.to_datetime(df['REPORT_DATE'])
+    df['EFFECTIVE_DATE'] = pd.to_datetime(df['EFFECTIVE_DATE'])
+    df['MATURITY']       = pd.to_datetime(df['MATURITY'])
 
+    # OPTIONAL: restrict to rolling window
     if data_year_basis is not None:
-        df_rolling_dates = rolling_dates(Monthly_Business_Days, year = data_year_basis)
-        start_date = df_rolling_dates['START_DATE'].iloc[-1]
-        end_date = df_rolling_dates['END_DATE'].iloc[-1]
-        data = data[(data['REPORT_DATE'] >= start_date) & (data['REPORT_DATE'] <= end_date)]
-        data.reset_index(drop=True, inplace=True)
+        rd = rolling_dates(monthly_bd_df, years=data_year_basis)
+        start_date = rd['START_DATE'].iloc[-1]
+        end_date   = rd['END_DATE'].iloc[-1]
 
-    if start_date is not None and  end_date is not None:
-        data = data[(data['REPORT_DATE'] >= start_date) & (data['REPORT_DATE'] <= end_date)]
-        data.reset_index(drop=True, inplace=True)
-    
-    currency_series = data["CURRENCY"]
-    
-    data = (
-        data
-        .assign(
-            NO=lambda x: np.where(
-                x['REPORT_DATE'] == x['CUSTOMER_ID'].map(Max_Report_Date.set_index('CUSTOMER_ID')['MAX_RPT']), 1, 0
-            )
-        )
-        .query("NO == 1")
-        .assign(LAST_REPORT_DATE=lambda x: x['REPORT_DATE'].max())
-        .assign(MAX_RPT_DATE=lambda x: x['CUSTOMER_ID'].map(Max_Report_Date.set_index('CUSTOMER_ID')['MAX_RPT']))
-        .groupby('CUSTOMER_ID')
-        .agg({
-            'REPORT_DATE': 'max',
-            'EFFECTIVE_DATE': 'max',
-            'MATURITY': 'max',
-            'NOTIONAL': 'max',
-            'LAST_REPORT_DATE': 'max'
-        })
-        .reset_index()
-        .assign(
-            MATURITY_CONT=lambda x: np.where(x['MATURITY'].dt.weekday >= 5, 1, 0),
-            MATURITY_NEW=lambda x: np.where(
-                x['MATURITY'].dt.weekday == 5, x['MATURITY'] + timedelta(days=2),
-                np.where(x['MATURITY'].dt.weekday == 6, x['MATURITY'] + timedelta(days=1), x['MATURITY'])
-            ),
-            NEXT_BUS_DATE=lambda x: x['REPORT_DATE'].apply(lambda x: next_business_day(x, Turkey_Holidays)),        
-            Maturity_Periods_D=lambda x: (x['MATURITY_NEW'] - x['EFFECTIVE_DATE']).dt.days,
-            Maturity_Periods_M=lambda x: (x['MATURITY_NEW'] - x['EFFECTIVE_DATE']).dt.days / (365.25 / 12),
-            SURV_TIME=lambda x: (x['NEXT_BUS_DATE'] - x['EFFECTIVE_DATE']).dt.days,
-            DIFF_TIME=lambda x: (x['MATURITY_NEW'] - x['NEXT_BUS_DATE']).dt.days,
-            #DIFF_MONTH=lambda x: (x['MATURITY_NEW'].apply(lambda date: date - (date - pd.offsets.MonthEnd(1)))).dt.days,
-            DIFF_MONTH=lambda x: (x['MATURITY_NEW'] - (x['MATURITY_NEW'] - pd.DateOffset(months=1))).dt.days,
-            TIME_BUCKET=lambda x: x['Maturity_Periods_M'].apply(classify_time_bucket)        
-        )
-        .assign(
-            Early_Withdrawal_Status=lambda x: np.where(
-                (x['NEXT_BUS_DATE'] < x['MATURITY_NEW']) & (x['DIFF_TIME'] > x['DIFF_MONTH']),
-                "Early", "OnTime"
-            )
-        )    
+    if start_date is not None and end_date is not None:
+        df = df[(df['REPORT_DATE'] >= pd.to_datetime(start_date)) & (df['REPORT_DATE'] <= pd.to_datetime(end_date))].reset_index(drop=True)
+
+    # Keep last report per customer_id
+    max_rpt = (
+        df.groupby('CUSTOMER_ID')['REPORT_DATE']
+          .agg(MAX_RPT='max', N_RPT='size')
+          .reset_index()
+    )
+    # shortcut map
+    mx = max_rpt.set_index('CUSTOMER_ID')['MAX_RPT']
+
+    # compute features on the last record per customer
+    def _nx(d): return next_business_day(d, holidays_df)
+
+    df2 = (
+        df.assign(NO=lambda x: np.where(x['REPORT_DATE'] == x['CUSTOMER_ID'].map(mx), 1, 0))
+          .query('NO == 1')
+          .assign(LAST_REPORT_DATE=lambda x: x['REPORT_DATE'].max())
+          .groupby('CUSTOMER_ID')
+          .agg({
+              'REPORT_DATE': 'max',
+              'EFFECTIVE_DATE': 'max',
+              'MATURITY': 'max',
+              'NOTIONAL': 'max',
+              'LAST_REPORT_DATE': 'max'
+          })
+          .reset_index()
+          .assign(
+              MATURITY_CONT=lambda x: np.where(pd.to_datetime(x['MATURITY']).dt.weekday >= 5, 1, 0),
+              MATURITY_NEW=lambda x: np.where(
+                  pd.to_datetime(x['MATURITY']).dt.weekday == 5, pd.to_datetime(x['MATURITY']) + pd.Timedelta(days=2),
+                  np.where(pd.to_datetime(x['MATURITY']).dt.weekday == 6, pd.to_datetime(x['MATURITY']) + pd.Timedelta(days=1),
+                           pd.to_datetime(x['MATURITY']))
+              ),
+              NEXT_BUS_DATE=lambda x: pd.to_datetime(x['REPORT_DATE']).apply(_nx),
+              Maturity_Periods_D=lambda x: (pd.to_datetime(x['MATURITY_NEW']) - pd.to_datetime(x['EFFECTIVE_DATE'])).dt.days,
+              Maturity_Periods_M=lambda x: (pd.to_datetime(x['MATURITY_NEW']) - pd.to_datetime(x['EFFECTIVE_DATE'])).dt.days / (365.25/12),
+              SURV_TIME=lambda x: (pd.to_datetime(x['NEXT_BUS_DATE']) - pd.to_datetime(x['EFFECTIVE_DATE'])).dt.days,
+              DIFF_TIME=lambda x: (pd.to_datetime(x['MATURITY_NEW']) - pd.to_datetime(x['NEXT_BUS_DATE'])).dt.days,
+              DIFF_MONTH=lambda x: (pd.to_datetime(x['MATURITY_NEW']) - (pd.to_datetime(x['MATURITY_NEW']) - pd.DateOffset(months=1))).dt.days,
+              TIME_BUCKET=lambda x: x['Maturity_Periods_M'].apply(classify_time_bucket)
+          )
+          .assign(
+              Early_Withdrawal_Status=lambda x: np.where(
+                  (pd.to_datetime(x['NEXT_BUS_DATE']) < pd.to_datetime(x['MATURITY_NEW'])) & (x['DIFF_TIME'] > x['DIFF_MONTH']),
+                  'Early', 'OnTime'
+              )
+          )
     )
 
-    data["CURRENCY"] = currency_series.loc[data.index].values
+    # Recover currency by customer from original df (last seen currency per id)
+    cur_map = df.sort_values('REPORT_DATE').groupby('CUSTOMER_ID')['CURRENCY'].last()
+    df2['CURRENCY'] = df2['CUSTOMER_ID'].map(cur_map)
 
-    data = data[data['DIFF_TIME'] >= 0]    
-    data[['BRANCH', 'CUSTOMER_NO','CUSTOMER_EX_NO', 'PRODUCT_CODE']] = (data['CUSTOMER_ID'].str.split('//', expand=True))    
-    selected_columns = ['REPORT_DATE','CUSTOMER_ID','BRANCH', 'CUSTOMER_NO','CUSTOMER_EX_NO', 'PRODUCT_CODE', 'CURRENCY', 'EFFECTIVE_DATE', 
-                        'MATURITY', 'NOTIONAL', 'LAST_REPORT_DATE', 'MATURITY_CONT', 'MATURITY_NEW', 'NEXT_BUS_DATE', 'Maturity_Periods_D', 
-                        'Maturity_Periods_M','SURV_TIME', 'DIFF_TIME', 'DIFF_MONTH', 'TIME_BUCKET', 'Early_Withdrawal_Status']    
-    print(data)
-    data = data[selected_columns]
-    
-    data = data[['REPORT_DATE','BRANCH', 'CURRENCY' ,'PRODUCT_CODE','TIME_BUCKET','NOTIONAL','SURV_TIME','Early_Withdrawal_Status']].copy()
-    data.rename(columns={'REPORT_DATE': 'Report_Date','BRANCH': 'Branch', 'CURRENCY': 'Currency', 'PRODUCT_CODE': 'Product_Code',
-                         'TIME_BUCKET': 'Time_Bucket','NOTIONAL': 'Notional', 'SURV_TIME': 'Survival_in_Days', 'Early_Withdrawal_Status': 'Status'}, inplace=True)
-    data['Status_TF'] = data['Status']
-    data['Status'] = data['Status'].replace({'Early': 1, 'OnTime': 0})
-    data['Status_TF'] = data['Status_TF'].replace({'Early': True, 'OnTime': False})
-    data['Early_Withdrawal_Notional'] = data['Notional'] * (data['Status'] == 1)
-            
-    return data
+    # Clean negatives
+    df2 = df2[df2['DIFF_TIME'] >= 0].copy()
 
-Max_Report_Date = (
-    data.groupby('CUSTOMER_ID')['REPORT_DATE']
-    .agg(MAX_RPT='max', 
-         N_RPT='size')
-    .reset_index()
-)
+    # Split CUSTOMER_ID if format 'BRANCH//CUSTOMER_NO//...//PRODUCT_CODE'
+    parts = df2['CUSTOMER_ID'].astype(str).str.split('//', expand=True)
+    for i, name in enumerate(['BRANCH','CUSTOMER_NO','CUSTOMER_EX_NO','PRODUCT_CODE']):
+        if i < parts.shape[1]:
+            df2[name] = parts[i].str.strip()
+        else:
+            df2[name] = pd.NA
 
-Max_Report_Date['CUSTOMER_IDs'] = Max_Report_Date.loc[:, 'CUSTOMER_ID']
-Max_Report_Date.set_index('CUSTOMER_IDs', inplace=True)
-Max_Report_Date.index.names = ['CUSTOMER_ID']
-
-Turkey_Holidays = pd.read_excel(turkey_holidays_filepath)
-
-Business_Days = pd.date_range(start=start_date, end=end_date, freq='B')
-Turkey_Business_Days = Business_Days[~Business_Days.isin(Turkey_Holidays['TURKEY_HOLIDAYS'])]
-#Turkey_Holidays.to_excel(wd_SAVE+'Turkey_Holidays.xlsx', index=False)
-
-Monthly_Business_Days = (
-    pd.DataFrame({"Business_Days": Turkey_Business_Days})
-    .assign(YearMonth=lambda df: df["Business_Days"].dt.to_period("M"))
-    .groupby("YearMonth")["Business_Days"]
-    .agg(["first", "last"])
-    .reset_index()
-)
-
-last_date_of_report = max(Max_Report_Date['MAX_RPT'])
-
-last_date_of_month = last_date_of_report.replace(month=last_date_of_report.month+1, day=1) - timedelta(days=1)
-
-Monthly_Business_Days = Monthly_Business_Days[(Monthly_Business_Days['last'] <= last_date_of_month)]
-
-Rolling_Dates = rolling_dates(Monthly_Business_Days, year = 8)
-
-Report_Early_Withdrawal = data_model(data,
-                                         data_year_basis = 8, 
-                                         start_date = start_date,                         
-                                         end_date = end_date)
-
-Early_Withdrawal_Analysis = (
-    Report_Early_Withdrawal.groupby(['Report_Date','Branch','Currency','Product_Code','Time_Bucket'], as_index=False)
-    .agg(Notional=("Notional", lambda x: round(x.sum(), 0)),
-         Early_Withdrawal_Notional=("Notional", lambda x: round(x[(Report_Early_Withdrawal.loc[x.index, 'Status'] == 1)].sum(), 0)),
-         N_Count=("Product_Code", "size"),
-         Early_Withdrawal_Cust_Ratio=('Status', lambda x: round((x == 1).sum() / len(x) * 100, 2))         
-        )
-    .assign(Early_Withdrawal_Not_Ratio=lambda x: round(x["Early_Withdrawal_Notional"] / x["Notional"] * 100, 2)
+    # Final tidy table
+    out = (df2[['REPORT_DATE','BRANCH','CURRENCY','PRODUCT_CODE','TIME_BUCKET','NOTIONAL','SURV_TIME','Early_Withdrawal_Status']]
+              .rename(columns={
+                  'REPORT_DATE':'Report_Date','CURRENCY':'Currency','PRODUCT_CODE':'Product_Code',
+                  'TIME_BUCKET':'Time_Bucket','NOTIONAL':'Notional','SURV_TIME':'Survival_in_Days',
+                  'Early_Withdrawal_Status':'Status'
+              })
            )
-)
+    out['Status_TF'] = out['Status'].map({'Early': True, 'OnTime': False})
+    out['Status']    = out['Status'].map({'Early': 1, 'OnTime': 0})
+    out['Early_Withdrawal_Notional'] = out['Notional'] * (out['Status'] == 1)
+    return out
 
-Early_Withdrawal_Notional_Ratio = ( 
-    Report_Early_Withdrawal.groupby(['Branch','Currency','Product_Code','Time_Bucket'])["Early_Withdrawal_Notional"].sum()
-    .div(Report_Early_Withdrawal.groupby(['Branch','Currency','Product_Code','Time_Bucket'])['Notional'].sum())
-    .reset_index(name="Early_Withdrawal_Not_Ratio")
-    .round(4)
-)
+# ---------------------- Public API ----------------------
 
-def df_early_withdrawal(data, 
-                        branch = None, 
-                        product = None, 
-                        time_bucket = None,
-                        currency = None):
+def run(data_file: Union[str, bytes, io.BytesIO],
+        holidays_file: Union[str, bytes, io.BytesIO],
+        start_date: Optional[Union[str, datetime]] = None,
+        end_date: Optional[Union[str, datetime]] = None,
+        years: int = 8,
+        write_rdata: bool = True,
+        rdata_path: str = "early_withdrawal_output.RData") -> Dict[str, Any]:
+    """Run Early Withdrawal Analysis end-to-end.
     
-    # Branch,Product_Code,Time_Bucket,Currency
-    if branch is not None and product is not None and time_bucket is not None and currency is not None:
-        data = data.loc[(data['Branch'] == branch) & (data['Product_Code'] == product) & (data['Time_Bucket'] == time_bucket) & (data['Currency'] == currency)]
-        data.reset_index(drop=True, inplace=True)        
-    # Product_Code,Time_Bucket,Currency	
-    if branch is None and product is not None and time_bucket is not None and currency is not None:
-        data = data.loc[(data['Product_Code'] == product) & (data['Time_Bucket'] == time_bucket) & (data['Currency'] == currency)]
-        data.reset_index(drop=True, inplace=True)
-    # Branch,Time_Bucket,Currency
-    if branch is not None and product is None and time_bucket is not None and currency is not None:
-        data = data.loc[(data['Branch'] == branch) & (data['Time_Bucket'] == time_bucket) & (data['Currency'] == currency)]
-        data.reset_index(drop=True, inplace=True)
-    # Branch,Product_Code,Currency
-    if branch is not None and product is not None and time_bucket is None and currency is not None:
-        data = data.loc[(data['Branch'] == branch) & (data['Product_Code'] == product) & (data['Currency'] == currency)]
-        data.reset_index(drop=True, inplace=True)
-    # Time_Bucket,Currency	
-    if branch is None and product is None and time_bucket is not None and currency is not None:
-        data = data.loc[(data['Time_Bucket'] == time_bucket) & (data['Currency'] == currency)]
-        data.reset_index(drop=True, inplace=True)
-    # Product_Code,Currency
-    if branch is None and product is not None and time_bucket is None and currency is not None:
-        data = data.loc[(data['Product_Code'] == product) & (data['Currency'] == currency)]
-        data.reset_index(drop=True, inplace=True)            
-    # Branch,Currency
-    if branch is not None and product is None and time_bucket is None and currency is not None:
-        data = data.loc[(data['Branch'] == branch) & (data['Currency'] == currency)]
-        data.reset_index(drop=True, inplace=True)
-    # Currency
-    if branch is None and product is None and time_bucket is None and currency is not None:
-        data = data.loc[(data['Currency'] == currency)]
-        data.reset_index(drop=True, inplace=True)
-    return data
+    Returns dict with:
+      - report_df: tidy record-level table used for aggregations
+      - analysis_df: daily analysis by Report_Date x Branch x Currency x Product_Code x Time_Bucket
+      - ratio_df: overall ratios by Branch x Currency x Product_Code x Time_Bucket
+      - monthly_bd_df, holidays_df
+      - rdata_path (if write_rdata)
+    """
+    # Read inputs
+    raw_df = _read_excel_any(data_file)
+    hol_df = _read_excel_any(holidays_file)
+    hol_df, monthly_bd = build_business_calendar(start_date, end_date, hol_df)
 
+    # Build the tidy record table
+    report_df = _data_model(raw_df, monthly_bd, hol_df, data_year_basis=years,
+                            start_date=start_date, end_date=end_date)
 
-if __name__ == "__main__":
-    df = df_early_withdrawal(Report_Early_Withdrawal, 
-                         branch = branch, 
-                         product = product,
-                         time_bucket = time_bucket, 
-                         currency = currency)
+    # Analysis frames
+    analysis_df = (
+        report_df.groupby(['Report_Date','Branch','Currency','Product_Code','Time_Bucket'], as_index=False)
+                 .agg(Notional=("Notional", "sum"),
+                      Early_Withdrawal_Notional=("Early_Withdrawal_Notional", "sum"),
+                      N_Count=("Product_Code", "size"),
+                      Early_Withdrawal_Cust_Ratio=('Status', lambda x: np.round((x == 1).sum() / len(x) * 100, 2)))
+    )
+    analysis_df['Early_Withdrawal_Not_Ratio'] = np.round(
+        np.where(analysis_df['Notional'] == 0, np.nan,
+                 analysis_df['Early_Withdrawal_Notional'] / analysis_df['Notional'] * 100), 2
+    )
 
-    time_points, survival_probabilities, confidence_interval, median_survival_time = kaplan_meier_estimator_custom(df)
+    ratio_df = (
+        report_df.groupby(['Branch','Currency','Product_Code','Time_Bucket'])['Early_Withdrawal_Notional'].sum() \
+                 .div(report_df.groupby(['Branch','Currency','Product_Code','Time_Bucket'])['Notional'].sum()) \
+                 .reset_index(name='Early_Withdrawal_Not_Ratio') \
+                 .round(4)
+    )
 
-    survival_probabilities_diff = survival_probabilities - 0.5
-    median_survival_time_adj = np.interp(min(survival_probabilities_diff), survival_probabilities_diff[::-1], time_points[::-1])
+    # Optionally write an .RData
+    rdata_out = None
+    if write_rdata:
+        if pyreadr is None:
+            raise ImportError("pyreadr kurulu değil. 'pip install pyreadr' ile kurup tekrar deneyin.")
+        # Save selected objects so the R-only script can read the same names
+        objects = {
+            'Report_Early_Withdrawal': report_df,
+            'Early_Withdrawal_Analysis': analysis_df,
+            'Early_Withdrawal_Notional_Ratio': ratio_df,
+            'Monthly_Business_Days': monthly_bd,
+            'Turkey_Holidays': pd.DataFrame({'TURKEY_HOLIDAYS': pd.to_datetime(hol_df['TURKEY_HOLIDAYS'])})
+        }
+        pyreadr.write_rdata(rdata_path, objects)  # writes a .RData with multiple objects
+        rdata_out = rdata_path
 
-    if max(survival_probabilities) > 0.5:  
-        median_survival_time = median_survival_time
-    else:
-        median_survival_time = median_survival_time_adj
-
-    fig = make_subplots(rows=1, cols=1, subplot_titles=(""))
-
-    fig.add_trace(go.Scatter(
-        x=time_points,
-        y=survival_probabilities,
-        mode='lines',
-        line=dict(color='darkorange'),
-        name='Notional / Core Deposit'),
-                row=1, col=1
-                )
-
-    y_min = round(min(survival_probabilities),2)
-
-    fig.update_layout(
-                title="Early Withdrawal Analysis",
-                width=700,
-                height=500,
-                plot_bgcolor="#fff",
-                showlegend=False,
-                yaxis=dict(range=[y_min,1])
-    ) 
-
-
-    fig.add_vline(x=median_survival_time_adj, line_width=2, line_dash="dot", line_color="royalblue")
-
-    fig.update_xaxes(title_text="Time", row=1, col=1)
-    fig.update_yaxes(title_text="Probability of Survival", row=1, col=1)
-
-    fig.show()
-
-    table_a = {'1-year Survival Probability (95% CI)': [],
-            '1-year Early Withdrawal Probability (95% CI)': [],
-            'Survival Time (Adjusted)': [],
-            'Survival Time (Probability)': [],
-            'Survival Time (Max)': []}
-
-    table_a['1-year Survival Probability (95% CI)'].append(round((np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
-    table_a['1-year Early Withdrawal Probability (95% CI)'].append(round((1-np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
-    table_a['Survival Time (Adjusted)'].append(round(median_survival_time_adj,0))
-    table_a['Survival Time (Probability)'].append(round((np.interp(median_survival_time_adj, time_points[::1], survival_probabilities[::1]))*100,2))
-    table_a['Survival Time (Max)'].append(round(median_survival_time,0))
-
-    table_a = pd.DataFrame(table_a)
-    display(HTML(table_a.to_html(index=False)))
+    return {
+        'report_df': report_df,
+        'analysis_df': analysis_df,
+        'ratio_df': ratio_df,
+        'monthly_bd_df': monthly_bd,
+        'holidays_df': hol_df,
+        'rdata_path': rdata_out,
+    }

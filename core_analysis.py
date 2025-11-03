@@ -61,6 +61,7 @@ if __name__ == "__main__":
 df = pd.read_excel(core_deposit_filepath)
 df.columns = df.columns.astype(str).str.replace(".", "_")
 
+
 def next_business_day(date, holidays_df):
     holidays = set(holidays_df.iloc[:,0])
     next_day = date + timedelta(days=1)
@@ -93,6 +94,7 @@ def classify_time_bucket(months):
     else:
         return "--"
 
+
 def rolling_dates(data, year = 5):
     rolling_dates = []
     period = year*12
@@ -100,13 +102,14 @@ def rolling_dates(data, year = 5):
         START_DATE = data.loc[i, "first"]
         END_DATE = data.loc[i + (period-1), "last"]
         rolling_dates.append({"START_DATE": START_DATE, "END_DATE": END_DATE})
-    
+
     rolling_dates = pd.DataFrame(rolling_dates)
-    
+
     return rolling_dates
 
+
 def data_model(data, data_year_basis = None, start_date = None, end_date = None, excel = False):
-    
+
     data['REPORT_DATE'] = pd.to_datetime(data['REPORT_DATE'])
 
     if data_year_basis is not None:
@@ -119,15 +122,15 @@ def data_model(data, data_year_basis = None, start_date = None, end_date = None,
     if start_date is not None and  end_date is not None:
         data = data[(data['REPORT_DATE'] >= start_date) & (data['REPORT_DATE'] <= end_date)]
         data.reset_index(drop=True, inplace=True)
-        
-    return data 
+
+    return data
 
 def df_core_deposit(data, 
                     branch = None, 
                     product = None, 
                     time_bucket = None,
                     currency = None):
-   
+
     # Branch,Product_Code,Time_Bucket,Currency
     if branch is not None and product is not None and time_bucket is not None and currency is not None:
         data = data.loc[(data['Branch'] == branch) & (data['Product_Code'] == product) & (data['Time_Bucket'] == time_bucket) & (data['Currency'] == currency)]
@@ -144,7 +147,7 @@ def df_core_deposit(data,
     if branch is not None and product is not None and time_bucket is None and currency is not None:
         data = data.loc[(data['Branch'] == branch) & (data['Product_Code'] == product) & (data['Currency'] == currency)]
         data = (data.groupby(['Report_Date'], as_index=False).agg({"Notional": "sum"}).reset_index(drop=True))    
-    # Time_Bucket,Currency	
+    # Time_Bucket,Currency
     if branch is None and product is None and time_bucket is not None and currency is not None:
         data = data.loc[(data['Time_Bucket'] == time_bucket) & (data['Currency'] == currency)]
         data = (data.groupby(['Report_Date'], as_index=False).agg({"Notional": "sum"}).reset_index(drop=True))    
@@ -160,7 +163,7 @@ def df_core_deposit(data,
     if branch is None and product is None and time_bucket is None and currency is not None:
         data = data.loc[(data['Currency'] == currency)]
         data = (data.groupby(['Report_Date'], as_index=False).agg({"Notional": "sum"}).reset_index(drop=True))                  
-        
+
     return data
 
 def core_deposit_analysis(data, 
@@ -169,7 +172,7 @@ def core_deposit_analysis(data,
                           time_bucket = None, 
                           currency = None,
                           freq = None, type = None, nsim = 100000, excel = False, plot = False):
-    
+
 
     # Branch,Product_Code,Time_Bucket,Currency
     if branch is not None and product is not None and time_bucket is not None and currency is not None:
