@@ -177,7 +177,8 @@ def data_model_core(df, monthly_bd_df, data_year_basis=None, start_date=None, en
 
     if data_year_basis is not None:
         df_rd = rolling_dates(monthly_bd_df, years=data_year_basis)
-        print(df_rd)
+        if df_rd.empty:
+            raise ValueError("No rolling dates could be computed from the provided monthly business days data.")
         start_date = df_rd["START_DATE"].iloc[-1]
         end_date = df_rd["END_DATE"].iloc[-1]
 
