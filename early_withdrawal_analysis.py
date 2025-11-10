@@ -252,7 +252,7 @@ def run(data_file: Union[str, bytes, io.BytesIO],
         write_rdata: bool = True,
         rdata_path: str = "early_withdrawal_output.RData") -> Dict[str, Any]:
     """Run Early Withdrawal Analysis end-to-end.
-    
+
     Returns dict with:
       - report_df: tidy record-level table used for aggregations
       - analysis_df: daily analysis by Report_Date x Branch x Currency x Product_Code x Time_Bucket

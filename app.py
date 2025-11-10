@@ -170,12 +170,14 @@ def kaplan_meier_estimator_custom(df):
 
 # --------------------------- Core Deposit analysis (from core_analysis.py) ---------------------------
 
+
 def data_model_core(df, monthly_bd_df, data_year_basis=None, start_date=None, end_date=None):
     df = df.copy()
     df["REPORT_DATE"] = pd.to_datetime(df["REPORT_DATE"])
 
     if data_year_basis is not None:
         df_rd = rolling_dates(monthly_bd_df, years=data_year_basis)
+        print(df_rd)
         start_date = df_rd["START_DATE"].iloc[-1]
         end_date = df_rd["END_DATE"].iloc[-1]
 
