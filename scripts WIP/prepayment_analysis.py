@@ -30,27 +30,38 @@ warnings.simplefilter('ignore')
 wd = r"C:\Users\adevr\ra_frtb\data"
 wd_SAVE = r"C:\Users\adevr\ra_frtb\data"
 wd_PRAM = r"C:\Users\adevr\ra_frtb\data"
-early_withdrawal_filepath = r"C:\Users\adevr\ra_frtb\data\EARLY_WITHDRAWAL_DATA.xlsx"
 
-data = pd.read_excel(early_withdrawal_filepath)
+prepayment_filepath = r"C:\Users\adevr\ra_frtb\data\PREPAYMENT_DATA.xlsx"
+data = pd.read_excel(prepayment_filepath)
 data.columns = data.columns.astype(str).str.replace(".", "_")
 
-def next_business_day(date, holidays_df):
-    holidays = set(holidays_df.iloc[:,0])
+Turkey_Holidays = pd.read_excel(f"{wd_PRAM}/Turkey_Holidays.xlsx")
+Turkey_Holidays['TURKEY_HOLIDAYS'] = pd.to_datetime(Turkey_Holidays['TURKEY_HOLIDAYS'])
+
+Business_Days = pd.date_range(start="2015-01-01", end="2035-12-31", freq='B')
+Turkey_Business_Days = Business_Days[~Business_Days.isin(Turkey_Holidays['TURKEY_HOLIDAYS'])]
+
+Monthly_Business_Days = (
+    pd.DataFrame({"Business_Days": Turkey_Business_Days})
+    .assign(YearMonth=lambda df: df["Business_Days"].dt.to_period("M"))
+    .groupby("YearMonth")["Business_Days"]
+    .agg(["first", "last"])
+    .reset_index()
+)
+
+
+def next_business_day(date, holidays):
     next_day = date + timedelta(days=1)
     while next_day.weekday() >= 5 or next_day in holidays:
         next_day += timedelta(days=1)
     return next_day
-    
+
+
 def classify_time_bucket(months):
-    if 0 <= months <= 1:
-        return "0-1M"
-    elif 1 < months <= 3:
-        return "1-3M"
-    elif 3 < months <= 6:
-        return "3-6M"
+    if 0 <= months <= 6:
+        return "0-6M"
     elif 6 < months <= 12:
-        return "6-12M"    
+        return "6-12M"
     elif 12 < months <= 24:
         return "1-2Y"
     elif 24 < months <= 36:
@@ -66,6 +77,7 @@ def classify_time_bucket(months):
     else:
         return "--"
 
+
 def rolling_dates(data, year = 5):
     rolling_dates = []
     period = year*12
@@ -77,7 +89,8 @@ def rolling_dates(data, year = 5):
     rolling_dates = pd.DataFrame(rolling_dates)
     
     return rolling_dates
-    
+
+
 def separate_customer_id(customer_id):
     try:
         parts = customer_id.split(' // ')
@@ -85,13 +98,15 @@ def separate_customer_id(customer_id):
     except:
         return pd.Series([None, None, None, None], index=['BRANCH', 'CUSTOMER_NO', 'PRODUCT_CODE', 'CURRENCY'])
 
+
 def move_string_to_end(s):
     parts = s.split(',')
     if "Currency" in parts:
         parts.remove("Currency")
         parts.append("Currency")
-    return ",".join(parts)
-    
+    return ",".join(parts)  
+
+
 def kaplan_meier_estimator_custom(df):
 
     if df is None or df.empty:
@@ -112,9 +127,19 @@ def kaplan_meier_estimator_custom(df):
         median_survival_time = median_survival_time_adj
         
     return time_points, survival_probabilities, confidence_interval, median_survival_time
-    
-def data_model(data, data_year_basis = None, start_date = None, end_date = None, excel = False):
-    
+
+
+def move_string_to_end(s):
+    parts = s.split(',')
+    if "Currency" in parts:
+        parts.remove("Currency")
+        parts.append("Currency")
+    return ",".join(parts)
+
+
+def data_model(data, data_year_basis = None, start_date = None, end_date = None, excel = False, Max_Report_Date = None):
+    if Max_Report_Date is None:
+        Max_Report_Date = data.groupby('CUSTOMER_ID')['REPORT_DATE'].max().reset_index().rename(columns={'REPORT_DATE': 'MAX_RPT'})
     data['REPORT_DATE'] = pd.to_datetime(data['REPORT_DATE'])
 
     if data_year_basis is not None:
@@ -127,7 +152,7 @@ def data_model(data, data_year_basis = None, start_date = None, end_date = None,
     if start_date is not None and  end_date is not None:
         data = data[(data['REPORT_DATE'] >= start_date) & (data['REPORT_DATE'] <= end_date)]
         data.reset_index(drop=True, inplace=True)
-    
+        
     currency_series = data["CURRENCY"]
     
     data = (
@@ -165,37 +190,43 @@ def data_model(data, data_year_basis = None, start_date = None, end_date = None,
             TIME_BUCKET=lambda x: x['Maturity_Periods_M'].apply(classify_time_bucket)        
         )
         .assign(
-            Early_Withdrawal_Status=lambda x: np.where(
+            Prepayment_Status=lambda x: np.where(
                 (x['NEXT_BUS_DATE'] < x['MATURITY_NEW']) & (x['DIFF_TIME'] > x['DIFF_MONTH']),
                 "Early", "OnTime"
             )
         )    
     )
-
+    # print(data.head())
     data["CURRENCY"] = currency_series.loc[data.index].values
 
-    data = data[data['DIFF_TIME'] >= 0]    
-    data[['BRANCH', 'CUSTOMER_NO','CUSTOMER_EX_NO', 'PRODUCT_CODE']] = (data['CUSTOMER_ID'].str.split('//', expand=True))    
-    selected_columns = ['REPORT_DATE','CUSTOMER_ID','BRANCH', 'CUSTOMER_NO','CUSTOMER_EX_NO', 'PRODUCT_CODE', 'CURRENCY', 'EFFECTIVE_DATE', 
-                        'MATURITY', 'NOTIONAL', 'LAST_REPORT_DATE', 'MATURITY_CONT', 'MATURITY_NEW', 'NEXT_BUS_DATE', 'Maturity_Periods_D', 
-                        'Maturity_Periods_M','SURV_TIME', 'DIFF_TIME', 'DIFF_MONTH', 'TIME_BUCKET', 'Early_Withdrawal_Status']    
-    # print(data)
+    data = data[data['DIFF_TIME'] >= 0]
+    data[['BRANCH', 'CUSTOMER_NO','CUSTOMER_EX_NO', 'PRODUCT_CODE']] = (data['CUSTOMER_ID'].str.split('//', expand=True))   
+    # print(data.head())  # TODO
+    selected_columns = [
+        'REPORT_DATE','CUSTOMER_ID','BRANCH','CUSTOMER_NO','CUSTOMER_EX_NO','PRODUCT_CODE',
+        'CURRENCY','EFFECTIVE_DATE','MATURITY','NOTIONAL',
+        'LAST_REPORT_DATE','MATURITY_CONT','MATURITY_NEW','NEXT_BUS_DATE',
+        'Maturity_Periods_D','Maturity_Periods_M','SURV_TIME',
+        'DIFF_TIME','DIFF_MONTH','TIME_BUCKET','Prepayment_Status'
+    ]
     data = data[selected_columns]
-    
-    data = data[['REPORT_DATE','BRANCH', 'CURRENCY' ,'PRODUCT_CODE','TIME_BUCKET','NOTIONAL','SURV_TIME','Early_Withdrawal_Status']].copy()
-    data.rename(columns={'REPORT_DATE': 'Report_Date','BRANCH': 'Branch', 'CURRENCY': 'Currency', 'PRODUCT_CODE': 'Product_Code',
-                         'TIME_BUCKET': 'Time_Bucket','NOTIONAL': 'Notional', 'SURV_TIME': 'Survival_in_Days', 'Early_Withdrawal_Status': 'Status'}, inplace=True)
+  
+    data = data[selected_columns]
+    data = data[['REPORT_DATE','NOTIONAL','BRANCH','CURRENCY' ,'PRODUCT_CODE','TIME_BUCKET','SURV_TIME','Prepayment_Status']].copy()
+    data.rename(columns={'REPORT_DATE': 'Report_Date', 'NOTIONAL': 'Notional','BRANCH': 'Branch', 'CURRENCY': 'Currency', 'PRODUCT_CODE': 'Product_Code',
+                          'TIME_BUCKET': 'Time_Bucket', 'SURV_TIME': 'Survival_in_Days', 'Prepayment_Status': 'Status'}, inplace=True)    
     data['Status_TF'] = data['Status']
+    data['Status_YN'] = data['Status']
     data['Status'] = data['Status'].replace({'Early': 1, 'OnTime': 0})
     data['Status_TF'] = data['Status_TF'].replace({'Early': True, 'OnTime': False})
-    data['Early_Withdrawal_Notional'] = data['Notional'] * (data['Status'] == 1)
-    
+    data['Status_YN'] = data['Status_YN'].replace({'Early': 'Yes', 'OnTime': 'No'})
+    data["Prepayment_Notional"] = data["Notional"] * (data["Status"] == 1)
+        
     if excel:
         data = pd.DataFrame(data)    
-        data.to_excel(wd_SAVE+'Report_Early_Withdrawal_df.xlsx', index=False)
+        data.to_excel(wd_SAVE+'Report_Prepayment_df.xlsx', index=False)
         
     return data
-
 
 Max_Report_Date = (
     data.groupby('CUSTOMER_ID')['REPORT_DATE']
@@ -208,19 +239,6 @@ Max_Report_Date['CUSTOMER_IDs'] = Max_Report_Date.loc[:, 'CUSTOMER_ID']
 Max_Report_Date.set_index('CUSTOMER_IDs', inplace=True)
 Max_Report_Date.index.names = ['CUSTOMER_ID']
 
-Turkey_Holidays = pd.read_excel(f"{wd_PRAM}/Turkey_Holidays.xlsx")
-
-Business_Days = pd.date_range(start="2015-01-01", end="2035-12-31", freq='B')
-Turkey_Business_Days = Business_Days[~Business_Days.isin(Turkey_Holidays['TURKEY_HOLIDAYS'])]
-#Turkey_Holidays.to_excel(wd_SAVE+'Turkey_Holidays.xlsx', index=False)
-
-Monthly_Business_Days = (
-    pd.DataFrame({"Business_Days": Turkey_Business_Days})
-    .assign(YearMonth=lambda df: df["Business_Days"].dt.to_period("M"))
-    .groupby("YearMonth")["Business_Days"]
-    .agg(["first", "last"])
-    .reset_index()
-)
 
 last_date_of_report = max(Max_Report_Date['MAX_RPT'])
 
@@ -230,35 +248,24 @@ Monthly_Business_Days = Monthly_Business_Days[(Monthly_Business_Days['last'] <= 
 
 Rolling_Dates = rolling_dates(Monthly_Business_Days, year = 8)
 
-Report_Early_Withdrawal = data_model(data, 
-                                         data_year_basis = 8, 
-                                         start_date = None,                         
-                                         end_date = None,                           
-                                         excel = False)
+Report_Prepayment = data_model(data, 
+                                   data_year_basis = 8, 
+                                   start_date = None,                         
+                                   end_date = None,                           
+                                   excel = False)
 
-Early_Withdrawal_Analysis = (
-    Report_Early_Withdrawal.groupby(['Report_Date','Branch','Currency','Product_Code','Time_Bucket'], as_index=False)
-    .agg(Notional=("Notional", lambda x: round(x.sum(), 0)),
-         Early_Withdrawal_Notional=("Notional", lambda x: round(x[(Report_Early_Withdrawal.loc[x.index, 'Status'] == 1)].sum(), 0)),
-         N_Count=("Product_Code", "size"),
-         Early_Withdrawal_Cust_Ratio=('Status', lambda x: round((x == 1).sum() / len(x) * 100, 2))         
-        )
-    .assign(Early_Withdrawal_Not_Ratio=lambda x: round(x["Early_Withdrawal_Notional"] / x["Notional"] * 100, 2)
-           )
-)
-
-Early_Withdrawal_Notional_Ratio = ( 
-    Report_Early_Withdrawal.groupby(['Branch','Currency','Product_Code','Time_Bucket'])["Early_Withdrawal_Notional"].sum()
-    .div(Report_Early_Withdrawal.groupby(['Branch','Currency','Product_Code','Time_Bucket'])['Notional'].sum())
-    .reset_index(name="Early_Withdrawal_Not_Ratio")
+Prepayment_Analysis = ( 
+    Report_Prepayment.groupby(['Branch','Currency','Product_Code','Time_Bucket'])["Prepayment_Notional"].sum()
+    .div(Report_Prepayment.groupby(['Branch','Currency','Product_Code','Time_Bucket'])['Notional'].sum())
+    .reset_index(name="Prepayment_Ratio")
     .round(4)
 )
 
-def df_early_withdrawal(data, 
-                        branch = None, 
-                        product = None, 
-                        time_bucket = None,
-                        currency = None):
+def df_prepayment(data, 
+                  branch = None, 
+                  product = None, 
+                  time_bucket = None,
+                  currency = None):
     
     # Branch,Product_Code,Time_Bucket,Currency
     if branch is not None and product is not None and time_bucket is not None and currency is not None:
@@ -280,10 +287,6 @@ def df_early_withdrawal(data,
     if branch is None and product is None and time_bucket is not None and currency is not None:
         data = data.loc[(data['Time_Bucket'] == time_bucket) & (data['Currency'] == currency)]
         data.reset_index(drop=True, inplace=True)
-    # Product_Code,Currency
-    if branch is None and product is not None and time_bucket is None and currency is not None:
-        data = data.loc[(data['Product_Code'] == product) & (data['Currency'] == currency)]
-        data.reset_index(drop=True, inplace=True)            
     # Branch,Currency
     if branch is not None and product is None and time_bucket is None and currency is not None:
         data = data.loc[(data['Branch'] == branch) & (data['Currency'] == currency)]
@@ -294,11 +297,11 @@ def df_early_withdrawal(data,
         data.reset_index(drop=True, inplace=True)
     return data
 
-df = df_early_withdrawal(Report_Early_Withdrawal, 
-                         branch = None, 
-                         product = None, 
-                         time_bucket = None, 
-                         currency = 'TRY')
+df = df_prepayment(Report_Prepayment, 
+                   branch = None, 
+                   product = None, 
+                   time_bucket = None , 
+                   currency = 'TRY')
 
 time_points, survival_probabilities, confidence_interval, median_survival_time = kaplan_meier_estimator_custom(df)
 
@@ -324,7 +327,7 @@ fig.add_trace(go.Scatter(
 y_min = round(min(survival_probabilities),2)
 
 fig.update_layout(
-            title="Early Withdrawal Analysis",
+            title="Prepayment Analysis",
             width=700,
             height=500,
             plot_bgcolor="#fff",
@@ -335,19 +338,23 @@ fig.update_layout(
 
 fig.add_vline(x=median_survival_time_adj, line_width=2, line_dash="dot", line_color="royalblue")
 
+fig.add_vline(x=365.25, line_width=2, line_dash="dot", line_color="firebrick")
+fig.add_hline(y=round((np.interp(365.25, time_points[::1], survival_probabilities[::1])),2), line_width=2, line_dash="dot", line_color="firebrick")
+
+
 fig.update_xaxes(title_text="Time", row=1, col=1)
 fig.update_yaxes(title_text="Probability of Survival", row=1, col=1)
 
 fig.show()
 
 table_a = {'1-year Survival Probability (95% CI)': [],
-           '1-year Early Withdrawal Probability (95% CI)': [],
+           '1-year Prepayment Probability (95% CI)': [],
            'Survival Time (Adjusted)': [],
            'Survival Time (Probability)': [],
            'Survival Time (Max)': []}
 
 table_a['1-year Survival Probability (95% CI)'].append(round((np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
-table_a['1-year Early Withdrawal Probability (95% CI)'].append(round((1-np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
+table_a['1-year Prepayment Probability (95% CI)'].append(round((1-np.interp(365.25, time_points[::1], survival_probabilities[::1]))*100,2))
 table_a['Survival Time (Adjusted)'].append(round(median_survival_time_adj,0))
 table_a['Survival Time (Probability)'].append(round((np.interp(median_survival_time_adj, time_points[::1], survival_probabilities[::1]))*100,2))
 table_a['Survival Time (Max)'].append(round(median_survival_time,0))
