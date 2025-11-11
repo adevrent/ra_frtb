@@ -48,8 +48,8 @@ if __name__ == "__main__":
     start_date = "2017-01-01"  # ENTERED BY USER
     end_date = "2025-12-31"  # ENTERED BY USER
 
-    core_deposit_filepath = r"C:\Users\adevr\riskactive_main\FRTB\From_Sait\Core Analysis\CORE_DEPOSIT_DATA.xlsx"  # file uploaded by user
-    turkey_holidays_filepath = r"C:\Users\adevr\riskactive_main\FRTB\From_Sait\TURKEY_HOLIDAYS.xlsx"  # file uploaded by user
+    core_deposit_filepath = r"C:\Users\adevr\Documents\Atakan Dosyalar\Düzenli Dosyalar\Güncel Konular\FRTB dosyaları\FRTB from Sait\CORE_DEPOSIT_DATA.xlsx"  # file uploaded by user
+    turkey_holidays_filepath = r"C:\Users\adevr\Documents\Atakan Dosyalar\Düzenli Dosyalar\Güncel Konular\FRTB dosyaları\FRTB from Sait\Turkey_Holidays.xlsx"  # file uploaded by user
 
     branch = None  # ENTERED BY USER
     product = None  # ENTERED BY USER
@@ -95,7 +95,7 @@ def classify_time_bucket(months):
         return "--"
 
 
-def rolling_dates(data, year = 5):
+def rolling_dates(data, year = 1):
     rolling_dates = []
     period = year*12
     for i in range(len(data) - (period-1)):
@@ -114,6 +114,11 @@ def data_model(data, data_year_basis = None, start_date = None, end_date = None,
 
     if data_year_basis is not None:
         df_rolling_dates = rolling_dates(Monthly_Business_Days, year = data_year_basis)
+        # if df_rolling_dates.empty:
+            
+            
+            
+        print(df_rolling_dates)
         start_date = df_rolling_dates['START_DATE'].iloc[-1]
         end_date = df_rolling_dates['END_DATE'].iloc[-1]
         data = data[(data['REPORT_DATE'] >= start_date) & (data['REPORT_DATE'] <= end_date)]
@@ -685,10 +690,10 @@ last_date_of_report = pd.to_datetime(df["REPORT_DATE"]).max()
 last_date_of_month = last_date_of_report.replace(month=last_date_of_report.month+1, day=1) - timedelta(days=1)
 Monthly_Business_Days = Monthly_Business_Days[(Monthly_Business_Days['last'] <= last_date_of_month)]
 
-Rolling_Dates = rolling_dates(Monthly_Business_Days, year = 8)
+Rolling_Dates = rolling_dates(Monthly_Business_Days, year = 1)
 
 Report_Core_Deposit = data_model(df, 
-                                     data_year_basis = 8,
+                                     data_year_basis = None,
                                      start_date = None,
                                      end_date = None,
                                      excel = False)

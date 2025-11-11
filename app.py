@@ -187,6 +187,7 @@ def data_model_core(df, monthly_bd_df, data_year_basis=None, start_date=None, en
 
     return df
 
+
 def reshape_core(df):
     df = df.rename(columns={
         'REPORT_DATE': 'Report_Date',
