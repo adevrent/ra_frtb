@@ -673,7 +673,7 @@ def core_deposit_analysis_rolling(data,
 Turkey_Holidays = pd.read_excel(f"{wd_PRAM}/Turkey_Holidays.xlsx")
 Turkey_Holidays['TURKEY_HOLIDAYS'] = pd.to_datetime(Turkey_Holidays['TURKEY_HOLIDAYS'])
 
-Business_Days = pd.date_range(start="2017-01-01", end="2035-12-31", freq='B')
+Business_Days = pd.date_range(start="2015-01-01", end="2035-12-31", freq='B')
 Turkey_Business_Days = Business_Days[~Business_Days.isin(Turkey_Holidays['TURKEY_HOLIDAYS'])]
 
 Monthly_Business_Days = (
