@@ -210,7 +210,7 @@ Max_Report_Date.index.names = ['CUSTOMER_ID']
 
 Turkey_Holidays = pd.read_excel(f"{wd_PRAM}/Turkey_Holidays.xlsx")
 
-Business_Days = pd.date_range(start="2017-01-01", end="2035-12-31", freq='B')
+Business_Days = pd.date_range(start="2015-01-01", end="2035-12-31", freq='B')
 Turkey_Business_Days = Business_Days[~Business_Days.isin(Turkey_Holidays['TURKEY_HOLIDAYS'])]
 #Turkey_Holidays.to_excel(wd_SAVE+'Turkey_Holidays.xlsx', index=False)
 
